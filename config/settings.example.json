@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "search": {
+    "target_tc": 200000,
+    "currency": "USD",
+    "location_mode": "bay_area_remote",
+    "preferred_locations": [
+      "Remote, US"
+    ],
+    "allowed_levels": [
+      "senior"
+    ],
+    "min_score": 40,
+    "max_packets_per_run": 5
+  },
+  "schedule": {
+    "timezone": "America/Los_Angeles",
+    "hour": 8,
+    "minute": 0,
+    "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "preparation": {
+    "daily_minutes": 60,
+    "horizon_days": 14,
+    "timezone": "America/Los_Angeles"
+  },
+  "research": {
+    "enabled": false,
+    "max_calls_per_run": 4,
+    "max_output_tokens": 5000,
+    "model_env": "OPENAI_MODEL"
+  },
+  "discovery": {
+    "auto_subscribe": false,
+    "max_candidates": 5
+  },
+  "sources": []
+}

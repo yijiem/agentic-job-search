@@ -1,0 +1,19 @@
+{
+  "name": "Your name",
+  "headline": "Your professional focus",
+  "skills": [
+    "C++",
+    "distributed systems"
+  ],
+  "evidence": [
+    {
+      "id": "example",
+      "text": "Replace with an exact achievement from your resume.",
+      "tags": [
+        "C++"
+      ],
+      "source_url": "https://example.com/your-resume"
+    }
+  ],
+  "resume_sources": []
+}
