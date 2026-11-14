@@ -9,19 +9,16 @@ The first release deliberately retains SQLite and private files to preserve the 
 Create a Supabase project, then:
 
 1. Enable the Email authentication provider and keep email confirmation enabled. Allow new email users: an invited person is created at the provider on their first sign-in. Jobflow's separate invite list controls access to the app.
-2. Set **both Confirm signup and Magic link** email templates to display the numeric code, for example:
-   ```html
-   <h2>Your Jobflow sign-in code</h2>
-   <p>Enter this code in Jobflow: <strong>{{ .Token }}</strong></p>
-   ```
-   The app accepts the code entered on its sign-in page; this release does not implement a magic-link callback.
-3. Configure custom SMTP before inviting real users. Supabase's built-in email service restricts recipients to project team addresses and is intended for testing. Use the SMTP provider's verified sender configuration.
+2. Keep the default **Confirm sign up** and **Magic link or OTP** email templates. Jobflow requests a PKCE email link and exchanges the provider authorization code on the server. Default templates work on the free plan; no email-template customization is required.
+3. For the owner pilot, use the same email address that belongs to your Supabase organization. Supabase's built-in email service only delivers to organization/team addresses, limits sending to two messages per hour, and is intended for testing. Configure custom SMTP before inviting other users; use a verified sender configuration. Free projects may pause after inactivity.
 4. Obtain the project HTTPS URL and **publishable key** (a legacy `anon` key also works). Do not provide the `service_role` or secret key to Jobflow.
-5. Once Render gives the app an HTTPS URL, set that as the Supabase Site URL.
+5. Once Render gives the app an HTTPS URL, set that root origin as the Supabase **Site URL**, and add exactly `https://YOUR-RENDER-HOST/auth/callback` to **Redirect URLs**. Do not use a wildcard redirect.
 
-References: [email OTP](https://supabase.com/docs/guides/auth/auth-email-passwordless), [email templates](https://supabase.com/docs/guides/auth/auth-email-templates), [custom SMTP](https://supabase.com/docs/guides/auth/auth-smtp).
+Open the sign-in email link in the **same browser** that requested it, within ten minutes. The browser carries an opaque HttpOnly, SameSite=Lax cookie; the corresponding PKCE verifier stays only in server memory. A callback is accepted once, checks the confirmed provider email against the invitation and pending browser request, and issues Jobflow's HttpOnly, SameSite=Strict session. A server restart safely invalidates pending sign-in links; request a new email if that happens. Provider access and refresh tokens are discarded, and authorization codes are not logged or reflected into the callback page. Signing in does not authorize Gmail, LinkedIn, or other service access.
 
-The app verifies the confirmed email with Supabase, binds it to an existing invitation, and issues its own HttpOnly session. Provider access and refresh tokens are discarded. Signing in does not authorize Gmail, LinkedIn, or other service access.
+Optional numeric codes remain supported. When custom SMTP (or a plan that permits template editing) is configured, include `<strong>{{ .Token }}</strong>` in both confirmation and magic-link templates. Users can expand **My email contains a numeric code** on the sign-in page.
+
+References: [email sign-in](https://supabase.com/docs/guides/auth/auth-email-passwordless), [PKCE flow](https://supabase.com/docs/guides/auth/sessions/pkce-flow), [email templates](https://supabase.com/docs/guides/auth/auth-email-templates), [custom SMTP](https://supabase.com/docs/guides/auth/auth-smtp).
 
 ## 2. Prepare and deploy the source
 
@@ -90,7 +87,7 @@ python3 -m jobflow cloud --cloud-root /var/data/jobflow accounts
 
 `invite` creates an allowlist entry and sends no email. `adopt` attaches a copy to that account and records a migration receipt. Retrying the same migration does not overwrite later changes; a different source or a populated destination is rejected. Run these commands in the live service shell, **not** a build/pre-deploy command or one-off job: those cannot access the persistent disk.
 
-Now open the app, request a code using that email, and sign in. A valid imported profile goes directly to the existing workspace. Use **Account** to review the preserved data; there is no need to upload the resume or redo preferences. Compare representative saved applications, completed tasks, and record counts before switching regular use to the cloud. Keep the original as a backup and move any local scheduled runs to the cloud workspace so two independently edited copies do not diverge.
+Now open the app, request a sign-in email using that address, and open its link in the same browser. A valid imported profile goes directly to the existing workspace. Use **Account** to review the preserved data; there is no need to upload the resume or redo preferences. Compare representative saved applications, completed tasks, and record counts before switching regular use to the cloud. Keep the original as a backup and move any local scheduled runs to the cloud workspace so two independently edited copies do not diverge.
 
 For additional users, run `invite --email ...` in the same live service shell. They receive an empty private profile and follow onboarding at first sign-in. They do not inherit the owner's resume, contacts, applications, or preferences. New workspaces use the public source template at `config/cloud_sources.example.json`; an operator can override it with an array of public source descriptors at `/var/data/jobflow/config/sources.json` before inviting new users. An imported owner retains the original source configuration.
 

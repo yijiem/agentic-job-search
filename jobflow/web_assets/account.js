@@ -115,8 +115,8 @@ function accountStory() {
   return `<aside class="account-story"><div class="eyebrow">YOUR NEXT CHAPTER</div><h1>${authenticated ? 'A search that starts with you.' : 'Your next move, with intention.'}</h1><p class="story-description">${authenticated ? 'Bring your experience and priorities together. Jobflow turns them into a focused search and a plan you can follow.' : 'Find relevant opportunities, keep your applications in order, and make room to prepare.'}</p>${stepList()}<div class="story-note"><span class="story-symbol" aria-hidden="true">✧</span><strong>Your experience stays yours.</strong>Your profile and job-search records belong to your private account. You choose what to add and when to connect a service.</div></aside>`;
 }
 function signInCard() {
-  if (accountState.step === 'code') return `<section class="account-card"><div class="eyebrow">CHECK YOUR EMAIL</div><h2>Welcome back.</h2><p class="card-description">If <strong>${accountEsc(accountState.email)}</strong> has an invitation, a sign-in code is on its way. Enter that code to open your workspace.</p><form id="verify-form"><div class="form-field"><label for="signin-code">Email code</label><input id="signin-code" class="code-input" name="token" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" minlength="6" maxlength="10" required aria-describedby="code-help"><small id="code-help">Use the most recent code. It expires after a short time.</small></div><p id="account-error" class="form-error" role="alert" tabindex="-1">${accountEsc(accountState.error)}</p><button class="button primary full-width" type="submit">Open my workspace <span aria-hidden="true">↗</span></button></form><div class="button-row"><button class="text-button" data-account-action="change-email">Use a different email</button><button class="text-button" data-account-action="resend">Send a new code</button></div></section>`;
-  return `<section class="account-card"><div class="eyebrow">WELCOME TO JOBFLOW</div><h2>A place for your next chapter.</h2><p class="card-description">Sign in with your invited email address. Your profile, saved opportunities, and progress will be waiting for you.</p><form id="signin-form"><div class="form-field"><label for="signin-email">Email address</label><input id="signin-email" name="email" type="email" maxlength="254" autocomplete="email" placeholder="you@example.com" value="${accountEsc(accountState.email)}" required><small>We’ll send a one-time code. No password to remember.</small></div><p id="account-error" class="form-error" role="alert" tabindex="-1">${accountEsc(accountState.error)}</p><button class="button primary full-width" type="submit">Continue with email <span aria-hidden="true">→</span></button></form><p class="fine-print">Jobflow is currently available by invitation. Use the email address your workspace owner invited.</p></section>`;
+  if (accountState.step === 'code') return `<section class="account-card"><div class="eyebrow">CHECK YOUR EMAIL</div><h2>Welcome back.</h2><p class="card-description">If <strong>${accountEsc(accountState.email)}</strong> has an invitation, a sign-in email is on its way. Open its link in this same browser within 10 minutes to continue.</p><p class="help">Keep this page open. If your email opens in another browser, copy its sign-in link into this browser instead.</p><p id="account-error" class="form-error" role="alert" tabindex="-1">${accountEsc(accountState.error)}</p><details><summary>My email contains a numeric code</summary><form id="verify-form"><div class="form-field"><label for="signin-code">Email code</label><input id="signin-code" class="code-input" name="token" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" minlength="6" maxlength="10" required aria-describedby="code-help"><small id="code-help">If your email includes a code, enter the most recent one here.</small></div><button class="button primary full-width" type="submit">Open my workspace <span aria-hidden="true">↗</span></button></form></details><div class="button-row"><button class="text-button" data-account-action="change-email">Use a different email</button><button class="text-button" data-account-action="resend">Send a new email</button></div></section>`;
+  return `<section class="account-card"><div class="eyebrow">WELCOME TO JOBFLOW</div><h2>A place for your next chapter.</h2><p class="card-description">Sign in with your invited email address. Your profile, saved opportunities, and progress will be waiting for you.</p><form id="signin-form"><div class="form-field"><label for="signin-email">Email address</label><input id="signin-email" name="email" type="email" maxlength="254" autocomplete="email" placeholder="you@example.com" value="${accountEsc(accountState.email)}" required><small>We’ll send a sign-in link. No password to remember.</small></div><p id="account-error" class="form-error" role="alert" tabindex="-1">${accountEsc(accountState.error)}</p><button class="button primary full-width" type="submit">Continue with email <span aria-hidden="true">→</span></button></form><p class="fine-print">Jobflow is currently available by invitation. Use the email address your workspace owner invited.</p></section>`;
 }
 function uploadList() {
   const uploads = accountState.draft.uploads || [];
@@ -182,7 +182,7 @@ function capturePreferences() {
   });
 }
 async function acceptAccount(account) {
-  if (!account.authenticated) throw new Error('Sign-in could not be completed. Request a new code and try again.');
+  if (!account.authenticated) throw new Error('Sign-in could not be completed. Request a new sign-in email and try again.');
   accountState.account = account;
   const onboarding = account.onboarding || await accountAPI('/api/onboarding');
   accountState.draft = draftFromOnboarding(onboarding);
@@ -194,7 +194,12 @@ async function initializeAccount() {
   try {
     const account = await accountAPI('/api/account');
     if (account.authenticated) await acceptAccount(account);
-    else { accountState.account = account; renderAccount(); }
+    else {
+      accountState.account = account;
+      if (new URLSearchParams(location.search).get('signin') === 'retry')
+        accountState.error = 'This sign-in link could not be used. Request a new email here, then open its link in this same browser.';
+      renderAccount();
+    }
   } catch (error) {
     accountNode('#account-main').innerHTML = `<section class="account-card failure"><div class="eyebrow">LET’S RECONNECT</div><h1>Your account is taking a moment.</h1><p>${accountEsc(error.message)}</p><button class="button primary" data-account-action="retry">Try again</button></section>`;
   }
@@ -213,8 +218,8 @@ async function accountAction(action, trigger) {
   if (action === 'retry') return initializeAccount();
   if (action === 'change-email') { accountState.step = 'email'; renderAccount(); accountNode('#signin-email').focus(); return; }
   if (action === 'resend') return withAccountBusy(async () => {
-    await accountAPI('/api/auth/start', {email:accountState.email});
-    accountNotice('If this email is invited, a new code is on its way.');
+    await accountAPI('/api/auth/start', {email:accountState.email, mode:'link'});
+    accountNotice('If this email is invited, a new sign-in email is on its way. Use its newest link in this browser.');
   });
   if (action === 'logout') return withAccountBusy(async () => {
     await accountAPI('/api/auth/logout', {});
@@ -274,8 +279,8 @@ async function submitAccountForm(form) {
   if (accountState.busy) return;
   if (form.id === 'signin-form') return withAccountBusy(async () => {
     accountState.email = accountNode('#signin-email').value.trim().toLowerCase();
-    await accountAPI('/api/auth/start', {email:accountState.email});
-    accountState.step = 'code'; renderAccount(); accountNode('#signin-code').focus();
+    await accountAPI('/api/auth/start', {email:accountState.email, mode:'link'});
+    accountState.step = 'code'; renderAccount(); focusAccountMain();
   });
   if (form.id === 'verify-form') return withAccountBusy(async () => {
     await acceptAccount(await accountAPI('/api/auth/verify', {email:accountState.email, token:accountNode('#signin-code').value.trim()}));

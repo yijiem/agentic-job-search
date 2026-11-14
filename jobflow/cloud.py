@@ -5,6 +5,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import secrets
 import signal
 import sqlite3
@@ -13,10 +14,10 @@ import threading
 from http.cookies import CookieError, SimpleCookie
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .cloud_accounts import Accounts
-from .cloud_auth import AuthError, RateLimiter, SupabaseEmailAuth
+from .cloud_auth import AuthError, PendingSignIns, RateLimiter, SupabaseEmailAuth
 from .cloud_jobs import WorkQueue, worker_loop
 from .onboarding import initialize_workspace, onboarding_state, save_onboarding, upload_resume
 from .web import (ASSET_DIRECTORY, STATIC_ASSETS, MAX_REQUEST_BYTES, JobflowHandler, WebError,
@@ -56,6 +57,8 @@ class CloudServer(ThreadingHTTPServer):
         self.origin = validate_origin(origin, address[0])
         self.secure_cookie = self.origin.startswith('https://')
         self.cookie_name = '__Host-jobflow' if self.secure_cookie else 'jobflow_local_session'
+        self.pending_cookie_name = '__Host-jobflow-pkce' if self.secure_cookie else 'jobflow_local_pkce'
+        self.pending_signins = PendingSignIns()
         self.root = Path(root).resolve()
         self.accounts = Accounts(self.root)
         self.queue = WorkQueue(self.root)
@@ -98,11 +101,15 @@ class CloudServer(ThreadingHTTPServer):
 class CloudHandler(JobflowHandler):
     server_version = 'Jobflow'
 
+    def send_header(self, keyword, value):
+        if keyword.casefold() == 'referrer-policy' and getattr(self, 'auth_callback_response', False):
+            value = 'no-referrer'
+        super().send_header(keyword, value)
+
     def end_headers(self):
-        cookie = getattr(self, 'response_cookie', None)
-        if cookie:
+        for cookie in getattr(self, 'response_cookies', []):
             self.send_header('Set-Cookie', cookie)
-            self.response_cookie = None
+        self.response_cookies = []
         location = getattr(self, 'response_location', None)
         if location:
             self.send_header('Location', location)
@@ -111,7 +118,7 @@ class CloudHandler(JobflowHandler):
             self.send_header('Strict-Transport-Security', 'max-age=31536000')
         super().end_headers()
 
-    def _allowed_host(self):
+    def _allowed_host(self, navigation=False):
         if self.headers.get('Host') != urlsplit(self.server.origin).netloc:
             raise WebError('This request does not match the configured application address.', 403)
         origin = self.headers.get('Origin')
@@ -119,18 +126,29 @@ class CloudHandler(JobflowHandler):
             raise WebError('Cross-origin requests are not allowed.', 403)
         if self.command == 'POST' and origin != self.server.origin:
             raise WebError('Send changes from the application page.', 403)
-        if self.headers.get('Sec-Fetch-Site') == 'cross-site':
+        if navigation:
+            # Public entry pages and email callbacks can arrive cross-site as
+            # top-level navigation. Private APIs keep the strict origin checks.
+            if (self.command != 'GET' or
+                    self.headers.get('Sec-Fetch-Mode', 'navigate') != 'navigate' or
+                    self.headers.get('Sec-Fetch-Dest', 'document') != 'document'):
+                raise WebError('Open the sign-in email link in this browser.', 403)
+        elif self.headers.get('Sec-Fetch-Site') == 'cross-site':
             raise WebError('Cross-site requests are not allowed.', 403)
 
-    def _session(self, required=True):
+    def _cookie(self, name):
         value = self.headers.get('Cookie', '')
         try:
             cookie = SimpleCookie()
             cookie.load(value)
-            token = cookie[self.server.cookie_name].value if self.server.cookie_name in cookie else ''
+            token = cookie[name].value if name in cookie else ''
         except (KeyError, ValueError, CookieError):
             token = ''
-        session = self.server.accounts.session(token) if token and len(token) < 256 else None
+        return token if len(token) < 256 else ''
+
+    def _session(self, required=True):
+        token = self._cookie(self.server.cookie_name)
+        session = self.server.accounts.session(token) if token else None
         if required and not session:
             raise WebError('Sign in to open your workspace.', 401)
         return session, token
@@ -175,7 +193,15 @@ class CloudHandler(JobflowHandler):
             self.server.cookie_name, '' if expire else token, 0 if expire else 43200)
         if self.server.secure_cookie:
             value += '; Secure'
-        self.response_cookie = value
+        self.response_cookies = getattr(self, 'response_cookies', []) + [value]
+
+    def _set_pending_cookie(self, token, expire=False):
+        value = '%s=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%s' % (
+            self.server.pending_cookie_name, '' if expire else token,
+            0 if expire else self.server.pending_signins.ttl)
+        if self.server.secure_cookie:
+            value += '; Secure'
+        self.response_cookies = getattr(self, 'response_cookies', []) + [value]
 
     def _redirect(self, location):
         self.response_location = location
@@ -201,7 +227,18 @@ class CloudHandler(JobflowHandler):
             if path == '/healthz':
                 self._respond(200, {'status': 'ok'})
                 return
-            self._allowed_host()
+            if path == '/auth/callback':
+                self.auth_callback_response = True
+                self._allowed_host(navigation=True)
+                self._auth_callback()
+                return
+            self._allowed_host(navigation=path in ('/', '/index.html', '/account', '/account.html'))
+            if path == '/auth/callback.js':
+                # A fresh document navigation ensures Strict session cookies are
+                # sent after returning from the provider's cross-site redirect.
+                self._respond(200, b"history.replaceState(null, '', '/account'); location.replace('/');",
+                              'application/javascript; charset=utf-8')
+                return
             if path in ('/account', '/account.html', '/account.js', '/account.css', '/styles.css'):
                 self._asset('account.html' if path == '/account' else path.lstrip('/'))
                 return
@@ -254,6 +291,20 @@ class CloudHandler(JobflowHandler):
         account = self.server.accounts.lookup_email(email)
         allowed = account and account.get('status') in ('active', 'invited')
         if not verify:
+            if payload.get('mode') == 'link':
+                previous = self._cookie(self.server.pending_cookie_name)
+                pending, verifier = self.server.pending_signins.start(email, previous)
+                # Identical cookies and JSON for invited and unknown addresses.
+                self._set_pending_cookie(pending)
+                if allowed:
+                    try:
+                        self.server.auth.start_link(email, verifier, self.server.origin + '/auth/callback')
+                    except AuthError:
+                        self.server.pending_signins.revoke(pending)
+                        self._set_pending_cookie('', expire=True)
+                        raise
+                self._respond(200, {'message': 'If this email has an invitation, a sign-in email is on its way.'})
+                return
             if allowed:
                 self.server.auth.start(email)
             self._respond(200, {'message': 'If this email has an invitation, a sign-in code is on its way.'})
@@ -261,6 +312,10 @@ class CloudHandler(JobflowHandler):
         if not allowed:
             raise WebError('The sign-in code could not be verified.', 401)
         identity = self.server.auth.verify(email, payload.get('token'))
+        account, csrf = self._complete_signin(identity)
+        self._respond(200, self._account_state({'account': account, 'csrf_token': csrf}))
+
+    def _complete_signin(self, identity):
         account = self.server.accounts.authenticate_identity(identity['id'], identity['email'])
         root = self._root(account)
         initialize_workspace(root, sources=self.server.sources)
@@ -269,9 +324,40 @@ class CloudHandler(JobflowHandler):
         unused, old_token = self._session(required=False)
         if old_token:
             self.server.accounts.revoke_session(old_token)
+        pending_token = self._cookie(self.server.pending_cookie_name)
+        if pending_token:
+            self.server.pending_signins.revoke(pending_token)
+            self._set_pending_cookie('', expire=True)
         token, csrf = self.server.accounts.create_session(account)
         self._set_session_cookie(token)
-        self._respond(200, self._account_state({'account': account, 'csrf_token': csrf}))
+        return account, csrf
+
+    def _auth_callback(self):
+        pending = self.server.pending_signins.consume(self._cookie(self.server.pending_cookie_name))
+        try:
+            query = parse_qs(urlsplit(self.path).query, max_num_fields=8, keep_blank_values=True)
+            codes = query.get('code', [])
+            if (pending is None or len(codes) != 1 or 'error' in query or
+                    not re.fullmatch(r'[A-Za-z0-9._~-]{1,2048}', codes[0])):
+                raise AuthError('Invalid sign-in link.')
+            email = pending['email']
+            account = self.server.accounts.lookup_email(email)
+            if not account or account.get('status') not in ('active', 'invited'):
+                raise AuthError('Invalid sign-in link.')
+            identity = self.server.auth.exchange_link(email, codes[0], pending['verifier'])
+            if str(identity.get('email', '')).casefold() != email:
+                raise AuthError('The sign-in provider did not confirm this email address.')
+            self._complete_signin(identity)
+        except (AuthError, ValueError, KeyError, TypeError):
+            # Never echo provider error text, authorization codes, or email data.
+            self._set_pending_cookie('', expire=True)
+            self._redirect('/account?signin=retry')
+            return
+        self._respond(200, b'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                      b'<meta name="referrer" content="no-referrer"><title>Opening Jobflow</title>'
+                      b'<script src="/auth/callback.js" defer></script></head><body>'
+                      b'<p>Opening your workspace. <a href="/">Continue to Jobflow</a></p></body></html>',
+                      'text/html; charset=utf-8')
 
     def do_POST(self):
         try:
@@ -329,7 +415,7 @@ class CloudHandler(JobflowHandler):
                 lock.release()
             self._respond(200, result)
         except AuthError:
-            self._respond(401, {'error': 'Sign-in could not be completed. Request a fresh code and try again.'})
+            self._respond(401, {'error': 'Sign-in could not be completed. Request a fresh sign-in email and try again.'})
         except (WebError, ValueError, KeyError, TypeError) as error:
             self._error(error)
         except subprocess.TimeoutExpired:

@@ -36,7 +36,7 @@ Preparation guides explain each exercise's role relevance and link to verified p
 ## What each agent does
 
 For the invite-only hosted pilot, see [the deployment guide](DEPLOYMENT.md).
-It adds email-code sign-in, isolated account workspaces, reviewed resume onboarding,
+It adds browser-bound email-link sign-in (with optional email codes), isolated account workspaces, reviewed resume onboarding,
 and a persistent background worker. The owner's existing profile, preferences,
 records, and completion history can be adopted before the first sign-in, skipping
 onboarding. Hosting preparation does not create cloud accounts or publish private
