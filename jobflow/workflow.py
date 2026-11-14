@@ -13,6 +13,21 @@ from .sources import canonical_url, fetch_source, job_id
 from .storage import utcnow
 
 
+def validate_daily_goals(config):
+    goals = config.get('daily_goals', {})
+    if not isinstance(goals, dict):
+        raise ValueError('daily_goals must be an object.')
+    if 'enabled' in goals and not isinstance(goals['enabled'], bool):
+        raise ValueError('daily_goals.enabled must be a boolean.')
+    limits = {'applications': (0, 100), 'learning_minutes': (0, 480),
+              'coding_minutes': (0, 480), 'system_design_minutes': (0, 480),
+              'application_minutes_each': (1, 120)}
+    for key, (low, high) in limits.items():
+        if key in goals and (isinstance(goals[key], bool) or not isinstance(goals[key], int)
+                             or not low <= goals[key] <= high):
+            raise ValueError('daily_goals.%s must be an integer from %s to %s.' % (key, low, high))
+
+
 def load_config(root):
     root = Path(root)
     config = json.loads((root / 'config/settings.json').read_text())
@@ -26,6 +41,7 @@ def load_config(root):
     prep = config['preparation']
     if not 15 <= prep['daily_minutes'] <= 480 or not 1 <= prep['horizon_days'] <= 90:
         raise ValueError('Preparation budget must be 15–480 minutes and horizon 1–90 days.')
+    validate_daily_goals(config)
     if len({s['id'] for s in config['sources']}) != len(config['sources']):
         raise ValueError('Source IDs must be unique.')
     if not profile.get('evidence'):
@@ -68,8 +84,27 @@ def ingest_job(store, raw, profile, config, seen_at=None, index=None):
     return job, not bool(previous)
 
 
-def search(store, config, profile):
+def selected_sources(config, source_ids=None):
+    """Validate a retry scope without changing the full configuration or state."""
     active = [s for s in config['sources'] if s.get('enabled', True)]
+    if source_ids is None:
+        return active
+    selected = set(source_ids)
+    if not selected:
+        raise ValueError('Select at least one source ID.')
+    configured = {s['id']: s for s in config['sources']}
+    unknown = selected - configured.keys()
+    if unknown:
+        raise ValueError('Unknown source ID(s): ' + ', '.join(sorted(unknown)))
+    disabled = {key for key in selected if not configured[key].get('enabled', True)}
+    if disabled:
+        raise ValueError('Disabled source ID(s): ' + ', '.join(sorted(disabled)))
+    return [s for s in active if s['id'] in selected]
+
+
+def search(store, config, profile, source_ids=None):
+    active = selected_sources(config, source_ids)
+    scope = {s['id'] for s in active} if source_ids is not None else None
     results = {'new_jobs': 0, 'fetched_jobs': 0, 'source_errors': {}, 'manual_sources': []}
     feeds = []
     index = {canonical_url(j.get('url', '')): j['id'] for j in store.all('jobs')}
@@ -110,8 +145,11 @@ def search(store, config, profile):
             store.put('source_health', source['id'], {
                 'id': source['id'], 'status': 'ok', 'checked_at': checked_at,
                 'count': len(jobs), 'message': 'Complete public feed snapshot.', 'url': source['url']})
-    # Preferences/profile edits also apply to stored/imported jobs.
+    # A full search applies preference edits to all stored/imported jobs.
+    # A retry leaves jobs owned by sources outside its scope untouched.
     for job in store.all('jobs'):
+        if scope is not None and job.get('source_id') not in scope:
+            continue
         job.update(match_job(job, profile, config))
         store.put('jobs', job['id'], job)
     results['matching_jobs'] = len(ranked_jobs(store, config))
@@ -148,7 +186,8 @@ def personalize(store, config, profile, research=None, selected_id=None, limit=N
              datetime.now().strftime('%Y-%W') if research else None], sort_keys=True).encode()).hexdigest()
         existing = store.get('packets', job['id'])
         retry_research = bool(research and existing and existing.get('research_notes', {}).get('status') == 'unavailable')
-        if not selected_id and existing and existing.get('input_signature') == signature and not retry_research:
+        if (not selected_id and existing and existing.get('input_signature') == signature
+                and not retry_research and not existing.get('needs_profile_review')):
             continue
         packet = build_packet(job, profile, contacts, research=research)
         if imported_research:
@@ -165,12 +204,24 @@ def personalize(store, config, profile, research=None, selected_id=None, limit=N
     return packets
 
 
-def prepare(store, config, profile, research=None):
+def prepare(store, config, profile, research=None, rebalance_daily=False):
+    options = {'research': research}
+    if rebalance_daily:
+        options['rebalance_daily'] = True
     plan = build_plan(profile, store.all('applications'), store.all('interviews'),
-                      store.all('tasks'), config, research=research)
+                      store.all('tasks'), config, **options)
     store.put_many('tasks', plan['tasks'])
     store.put('plans', 'current', {**plan, 'id': 'current', 'updated_at': utcnow()})
+    coach(store, config)
     return plan
+
+
+def coach(store, config, today=None):
+    from .coaching import build_coaching
+    report = build_coaching(store.all('applications'), store.all('tasks'), store.all('activities'),
+                            store.all('interviews'), store.all('research'), store.all('jobs'), config, today=today)
+    store.put('coaching', report['date'], {**report, 'id': report['date'], 'updated_at': utcnow()})
+    return report
 
 
 def scheduled_due(store, config, now=None):

@@ -22,7 +22,9 @@ class SourceError(RuntimeError):
 
 TRACKING_KEYS = {"gh_src", "lever-source", "lever-origin", "fbclid", "gclid",
                  "mc_cid", "mc_eid", "trk", "trackingid"}
-MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+# Large public employer boards can exceed 32 MiB with full descriptions.
+# Keep a hard cap rather than trusting Content-Length or reading unbounded data.
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 def canonical_url(url):
@@ -89,7 +91,8 @@ def _request_json(url, timeout=20, retries=2):
             with urlopen(request, timeout=timeout) as response:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
-                raise SourceError("Job board response exceeds the 32 MiB limit")
+                raise SourceError("Job board response exceeds the {:g} MiB limit".format(
+                    MAX_RESPONSE_BYTES / (1024 * 1024)))
             try:
                 return json.loads(raw.decode("utf-8"))
             except (ValueError, UnicodeError) as exc:
@@ -286,7 +289,7 @@ def fetch_source(source):
         if not source.get(key):
             raise SourceError("Source missing required field: " + key)
     board = str(source["board"])
-    if not re.fullmatch(r"[a-zA-Z0-9_-]+", board):
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", board):
         raise SourceError("Board must be an ATS board token, not a URL")
     token = quote(board, safe="")
     if kind == "greenhouse":

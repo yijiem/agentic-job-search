@@ -10,7 +10,28 @@ from .reports import atomic_write
 
 STAGES = ('saved', 'applied', 'recruiter', 'technical', 'onsite', 'offer', 'rejected', 'withdrawn')
 STATUSES = ('todo', 'doing', 'done', 'skipped', 'unscheduled')
-KINDS = ('applications', 'interviews', 'tasks', 'contacts', 'jobs', 'research')
+KINDS = ('applications', 'interviews', 'tasks', 'contacts', 'jobs', 'research', 'activities')
+ACTIVITY_CATEGORIES = ('learning', 'coding', 'system_design')
+
+
+def explicit_timestamp(value, field):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        raise ValueError(field + ' must be an ISO datetime with a timezone offset.')
+    if parsed.tzinfo is None:
+        raise ValueError(field + ' needs an explicit timezone offset.')
+    return str(value)
+
+
+def integer_minutes(value, field, minimum=0, maximum=None):
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(field + ' must be an integer.')
+    if isinstance(value, bool) or str(value) != str(number) or number < minimum or (maximum is not None and number > maximum):
+        raise ValueError(field + ' is outside the allowed integer range.')
+    return number
 
 
 def valid_url(value):
@@ -51,6 +72,8 @@ def validate_record(kind, row, store):
     # IDs become local report filenames.
     if any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in row['id']):
         raise ValueError('Record IDs may contain only letters, digits, underscores, and hyphens.')
+    previous = store.get(kind, row.get('job_id', row['id']) if kind == 'applications' else row['id']) or {}
+    row = {**previous, **row}
     if kind in ('applications', 'interviews'):
         job = store.get('jobs', row.get('job_id', ''))
         if not job:
@@ -60,6 +83,8 @@ def validate_record(kind, row, store):
         row['id'] = row['job_id']
         if row.get('stage') not in STAGES:
             raise ValueError('Application stage must be one of: ' + ', '.join(STAGES))
+        if row.get('applied_at'):
+            explicit_timestamp(row['applied_at'], 'applied_at')
     elif kind == 'interviews':
         value = datetime.fromisoformat(row.get('starts_at', '').replace('Z', '+00:00'))
         if value.tzinfo is None:
@@ -76,6 +101,24 @@ def validate_record(kind, row, store):
         row['minutes'] = int(row.get('minutes', 0))
         if row['minutes'] <= 0 or not row.get('title'):
             raise ValueError('Tasks need positive minutes and a title.')
+        if row.get('completed_at'):
+            explicit_timestamp(row['completed_at'], 'completed_at')
+        if row.get('actual_minutes') not in (None, ''):
+            row['actual_minutes'] = integer_minutes(row['actual_minutes'], 'actual_minutes')
+    elif kind == 'activities':
+        for key in ('notes', 'source_url', 'task_id'):
+            row.setdefault(key, '')
+        try:
+            date.fromisoformat(row.get('date', ''))
+        except (TypeError, ValueError):
+            raise ValueError('Activity date must be an ISO date (YYYY-MM-DD).')
+        if row.get('category') not in ACTIVITY_CATEGORIES:
+            raise ValueError('Activity category must be learning, coding, or system_design.')
+        row['minutes'] = integer_minutes(row.get('minutes', 0), 'Activity minutes', 1, 1440)
+        if row.get('source_url') and not valid_url(row['source_url']):
+            raise ValueError('Activity source_url must be an HTTP(S) URL.')
+        if row.get('task_id') and not store.get('tasks', row['task_id']):
+            raise ValueError('Activity task_id must reference an existing task.')
     elif kind == 'contacts':
         if not row.get('name') or not row.get('company'):
             raise ValueError('Contacts need name and company.')
@@ -128,6 +171,7 @@ CSV_COLUMNS = {
     'interviews': ['id', 'job_id', 'company', 'round', 'starts_at', 'notes'],
     'tasks': ['id', 'due_date', 'title', 'category', 'company', 'minutes', 'status', 'source_url', 'notes'],
     'contacts': ['id', 'name', 'company', 'title', 'profile_url', 'relationship', 'via', 'team', 'evidence_url', 'notes'],
+    'activities': ['id', 'date', 'category', 'minutes', 'task_id', 'source_url', 'notes'],
 }
 
 

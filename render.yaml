@@ -1,0 +1,28 @@
+# Source-only, invite-only pilot. No deployment is created by this file.
+# Runtime data and owner snapshots belong on the disk, never in Git.
+services:
+  - type: web
+    name: jobflow-private
+    runtime: python
+    region: oregon
+    plan: 1c-2g
+    numInstances: 1
+    autoDeployTrigger: "off"
+    buildCommand: python3 -m unittest discover -s tests -q
+    startCommand: python3 deploy/start.py
+    healthCheckPath: /healthz
+    disk:
+      name: jobflow-private-data
+      mountPath: /var/data/jobflow
+      sizeGB: 5
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.14.10"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: JOBFLOW_CLOUD_ROOT
+        value: /var/data/jobflow
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false

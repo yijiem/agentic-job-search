@@ -1,7 +1,7 @@
 """Grounded relationship leads and review-only application materials.
 
-Contact records are evidence supplied by the user, not a social graph.  Public
-leads and optional model research never become confirmed personal connections.
+Contact records contain supplied relationships or dated account observations.
+Public leads and optional model research never become personal connections.
 Resume text is selected and reordered verbatim from the candidate's evidence.
 """
 
@@ -97,14 +97,26 @@ def _rank_contacts(job: dict, contacts: List[dict]) -> List[dict]:
         seen.add(identity)
         relationship = _text(row.get("relationship")).lower()
         via = _text(row.get("via"))
+        mutuals = [{"name": _text(person.get("name")),
+                    "profile_url": _url(person.get("profile_url"))}
+                   for person in _list(row.get("mutual_connections"))
+                   if isinstance(person, dict) and _text(person.get("name"))]
+        if not via and mutuals:
+            via = ", ".join(person["name"] for person in mutuals)
+        observed = row.get("relationship_source") == "linkedin_signed_in_observation"
         if relationship == "direct":
-            label = "User-recorded direct connection"
+            label = "LinkedIn-observed direct connection" if observed else "User-recorded direct connection"
             strength = 3
-            basis = "The direct connection is supplied in your contact record; it has not been independently verified."
+            basis = ("LinkedIn displayed a direct connection in your signed-in account on the recorded observation date. "
+                     "This does not establish referral willingness." if observed else
+                     "The direct connection is supplied in your contact record; it has not been independently verified.")
         elif relationship == "mutual" and via:
-            label = "User-recorded mutual connection via " + via
+            label = ("LinkedIn-observed mutual connection via " if observed else
+                     "User-recorded mutual connection via ") + via
             strength = 2
-            basis = "The introduction path is supplied in your contact record; confirm it with " + via + "."
+            basis = ("LinkedIn displayed the named mutual connection(s) in your signed-in account on the recorded observation date. "
+                     "Confirm an introduction with " + via + "." if observed else
+                     "The introduction path is supplied in your contact record; confirm it with " + via + ".")
         else:
             # A company match, common school, or public profile is never a referral.
             relationship = "public" if relationship == "public" else "unknown"
@@ -127,13 +139,16 @@ def _rank_contacts(job: dict, contacts: List[dict]) -> List[dict]:
             "relationship_label": label,
             "relationship_basis": basis,
             "via": via if relationship == "mutual" else "",
+            "mutual_connections": mutuals if relationship == "mutual" else [],
+            "relationship_source": _text(row.get("relationship_source")) or "user_contact_record",
+            "related_job_ids": [_text(key) for key in _list(row.get("related_job_ids")) if _text(key)],
             "team": recorded_team,
             "scope": scope,
             "affiliation_confidence": "recorded team match; unverified" if team_matches else "recorded company match; unverified",
             "hiring_manager_for_role": False,
             "uncertainty": "Verify current affiliation and responsibility for this opening. A matching team or management title does not establish the hiring manager for this role.",
             "notes": _text(row.get("notes")),
-            "source_date": _text(row.get("source_date")) or None,
+            "source_date": _text(row.get("source_date") or row.get("observed_at")) or None,
             "score": strength * 100 + (40 if team_matches else 0) + (20 if recruiter else 10 if management else 0),
         })
     return sorted(ranked, key=lambda row: (-row["score"], row["name"].lower()))
@@ -291,7 +306,7 @@ def build_packet(job: dict, profile: dict, contacts: List[dict], research: Optio
         "research_notes": _research_notes(job, research),
         "cautions": [
             "Drafts require your review; nothing has been sent and the source resume has not been edited.",
-            "Connections are user-recorded, and public profiles do not prove a personal relationship or referral.",
+            "Connections come from user records or dated account observations; public profiles do not prove a personal relationship or referral.",
             "Contact source links and dates are supplied records, not proof that the source was checked during this run.",
             "Exact hiring responsibility and current team affiliation remain unverified.",
             "Resume text is copied verbatim from supplied evidence; ordering and skill emphasis are recommendations, not newly verified achievements.",

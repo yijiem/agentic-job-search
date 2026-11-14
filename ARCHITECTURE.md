@@ -12,14 +12,16 @@ flowchart TD
   DB --> I[Interview Preparation Agent]
   T[Application stages and interview dates] --> I
   I --> DB
+  DB --> D[Daily Goals and Learning Coach]
+  D --> DB
   DB --> V[Markdown review and editable trackers]
   V --> U[User feedback and edits]
   U --> DB
 ```
 
-The orchestrator runs source requests concurrently and passes durable records between agents. Agents are separate Python modules with testable contracts, not three unconstrained chat sessions. Model-backed public research is optional. Human review controls sending, applications, and final resume edits; this program contains no message-sending or application-submission tool.
+The orchestrator runs source requests concurrently and passes durable records between agents. Agents are separate Python modules with testable contracts. Model-backed public research is optional. Human review controls sending, applications, and final resume edits; this program contains no message-sending or application-submission tool.
 
-`jobs`, `source_health`, `packets`, `contacts`, `applications`, `interviews`, `tasks`, `research`, `candidates`, and `schedule` are versionable JSON records in SQLite. Every record has stable identity and created/updated timestamps. Agent failures remain visible in the `runs` table. Reports are replaceable projections of that state; imports preserve task metadata and user completion.
+`jobs`, `source_health`, `packets`, `contacts`, `applications`, `interviews`, `tasks`, `activities`, `coaching`, `research`, `candidates`, and `schedule` are versionable JSON records in SQLite. Every record has stable identity and created/updated timestamps. Submission and completion timestamps are separate evidence; storage timestamps never establish when work happened. Agent failures remain visible in the `runs` table. Reports are replaceable projections of that state; imports preserve task metadata and user completion.
 
 ## Suggested improvements, in order
 
@@ -27,7 +29,7 @@ The orchestrator runs source requests concurrently and passes durable records be
 2. **Contact graph.** Import your LinkedIn connections export and your own recorded introduction paths. Model candidate → known contact → public lead → team → role, with source, verification date, and confidence per edge. Exported first-degree connections cannot prove second-degree paths without additional evidence.
 3. **Compensation evidence.** Maintain separately sourced company/level/location bands, date, base, annualized equity, bonus, and confidence. Levels.fyi is a source of estimates; recruiter confirmation establishes role-specific expectations. Avoid hard rejection from an unknown package or an incomplete base range. Equity liquidity and annualization need separate treatment.
 4. **Calendar connection and adaptive prep.** Connect a calendar selected by the user, deduplicate by event ID, and handle time-zone changes/cancellations. Record correctness, completion time, and confidence per practice topic; prioritize weaknesses with spaced repetition and deadline-aware mocks.
-5. **A review dashboard.** Add a local interface over SQLite for job review, relationship evidence, resume comparisons, and drag-to-reschedule practice. The current Markdown + CSV workflow keeps storage usable before a UI is chosen.
+5. **Dashboard extensions.** The local web application now exposes review, analytics, application tracking, relationship evidence, and preparation over the existing SQLite workspace. Future extensions can add direct calendar integration, richer recorded network edges, and authenticated remote hosting. See [WEB_APP.md](WEB_APP.md) for the UI/API/core boundary.
 
 ## Automatic discovery design
 

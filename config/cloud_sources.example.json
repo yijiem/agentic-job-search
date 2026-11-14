@@ -1,0 +1,7 @@
+[
+  {"id":"anthropic","company":"Anthropic","kind":"greenhouse","board":"anthropic","url":"https://www.anthropic.com/careers","enabled":true},
+  {"id":"openai","company":"OpenAI","kind":"ashby","board":"openai","url":"https://openai.com/careers/search/","enabled":true},
+  {"id":"databricks","company":"Databricks","kind":"greenhouse","board":"databricks","url":"https://www.databricks.com/company/careers/open-positions","enabled":true},
+  {"id":"roblox","company":"Roblox","kind":"greenhouse","board":"roblox","url":"https://careers.roblox.com/jobs","enabled":true},
+  {"id":"snowflake","company":"Snowflake","kind":"ashby","board":"snowflake","url":"https://careers.snowflake.com/us/en","enabled":true}
+]

@@ -14,3 +14,14 @@ jobflow = "jobflow.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["jobflow*"]
+
+[tool.setuptools.package-data]
+jobflow = [
+  "web_assets/*.html", "web_assets/*.css", "web_assets/*.js",
+  "web_assets/fonts/*.woff2", "web_assets/fonts/*OFL.txt", "web_assets/fonts/README.md",
+  "web_assets/art/*.webp", "web_assets/art/README.md",
+  "web_assets/vendor/leaflet/*.js", "web_assets/vendor/leaflet/*.css",
+  "web_assets/vendor/leaflet/*.txt", "web_assets/vendor/leaflet/*.md",
+  "web_assets/vendor/leaflet/LICENSE",
+  "web_assets/vendor/leaflet/images/*.png",
+]
