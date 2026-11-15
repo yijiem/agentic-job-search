@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,18 @@ from jobflow.storage import Store
 
 
 class HostedCommandTests(unittest.TestCase):
+    def test_remote_cloud_serve_uses_separate_worker(self):
+        with patch('jobflow.cloud.serve') as serve:
+            with patch.dict(os.environ, {'JOBFLOW_BACKEND': 'supabase'}):
+                main(['cloud', 'serve', '--origin', 'https://jobs.example.test'])
+            self.assertFalse(serve.call_args.kwargs['worker'])
+            with patch.dict(os.environ, {'JOBFLOW_BACKEND': 'local'}):
+                main(['cloud', 'serve', '--origin', 'https://jobs.example.test'])
+            self.assertTrue(serve.call_args.kwargs['worker'])
+            with patch.dict(os.environ, {'JOBFLOW_BACKEND': 'local'}):
+                main(['cloud', 'serve', '--no-worker', '--origin', 'https://jobs.example.test'])
+            self.assertFalse(serve.call_args.kwargs['worker'])
+
     def test_rematch_preserves_job_lifecycle_and_completed_history_without_network(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

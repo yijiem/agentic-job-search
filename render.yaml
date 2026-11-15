@@ -1,28 +1,49 @@
-# Source-only, invite-only pilot. No deployment is created by this file.
-# Runtime data and owner snapshots belong on the disk, never in Git.
+# Invite-only app; Supabase owns all durable records and private files.
+# Review active worker usage before creating paid resources.
 services:
   - type: web
     name: jobflow-private
     runtime: python
     region: oregon
-    plan: 1c-2g
-    numInstances: 1
+    plan: free
     autoDeployTrigger: "off"
-    buildCommand: python3 -m unittest discover -s tests -q
+    buildCommand: JOBFLOW_BACKEND=local python3 -m unittest discover -s tests -q
     startCommand: python3 deploy/start.py
     healthCheckPath: /healthz
-    disk:
-      name: jobflow-private-data
-      mountPath: /var/data/jobflow
-      sizeGB: 5
     envVars:
       - key: PYTHON_VERSION
         value: "3.14.10"
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: JOBFLOW_BACKEND
+        value: supabase
       - key: JOBFLOW_CLOUD_ROOT
-        value: /var/data/jobflow
+        value: /tmp/jobflow
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+  - type: cron
+    name: jobflow-worker
+    runtime: python
+    region: oregon
+    plan: 1c-2g
+    schedule: "7,22,37,52 * * * *"
+    autoDeployTrigger: "off"
+    buildCommand: JOBFLOW_BACKEND=local python3 -m unittest discover -s tests -q
+    startCommand: python3 deploy/worker.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.14.10"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: JOBFLOW_BACKEND
+        value: supabase
+      - key: JOBFLOW_CLOUD_ROOT
+        value: /tmp/jobflow
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
         sync: false

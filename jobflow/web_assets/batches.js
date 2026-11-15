@@ -377,7 +377,14 @@
       if(result)resetHandoffReview();await load(true);
     }
   }
-  function schedule() {clearTimeout(ui.timer);ui.timer=setTimeout(async()=>{if(!ui.active)return;await load();schedule();},5000);}
+  function shouldPoll() {return ui.active&&!ui.workspace?.account?.hosted&&ui.data?.codex?.available!==false;}
+  function schedule() {
+    clearTimeout(ui.timer);ui.timer=null;
+    // Hosted batches have no local Codex worker. Opening the view and explicit
+    // actions still refresh it, without repeatedly transferring private records.
+    if(!shouldPoll())return;
+    ui.timer=setTimeout(async()=>{ui.timer=null;if(!shouldPoll())return;await load();schedule();},5000);
+  }
   function mount(runtime) {ui.runtime=runtime;const wasActive=ui.active;ui.active=true;restoreFocus();if(!wasActive){load(true,true);schedule();}}
   function unmount() {ui.active=false;clearTimeout(ui.timer);ui.timer=null;}
   function retainingBatch(jobId) {

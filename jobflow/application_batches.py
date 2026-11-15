@@ -191,6 +191,10 @@ def _public_codex_run(run):
 
 
 def workspace_id(root):
+    from .remote import workspace_id as remote_workspace_id
+    remote_id = remote_workspace_id(root, required=False)
+    if remote_id:
+        return remote_id
     return hashlib.sha256(str(Path(root).resolve()).encode('utf-8')).hexdigest()[:32]
 
 
@@ -353,6 +357,14 @@ def _public_batch(batch):
 def _read_kinds(root):
     path = Path(root) / 'data/jobflow.sqlite3'
     result = {BATCH_KIND: [], RESUME_KIND: [], 'application_worker': []}
+    from .remote_files import is_remote_root
+    if is_remote_root(root):
+        from .storage import Store
+        store = Store(path)
+        try:
+            return {kind: store.all(kind) for kind in result}
+        finally:
+            store.close()
     if not path.exists():
         return result
     connection = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=10)
@@ -403,6 +415,8 @@ def _resume_record(store, value):
 def _resume_bytes(root, record):
     directory = _resume_directory(root)
     path = directory / record['id']
+    from .remote_files import ensure_path
+    path = ensure_path(path)
     flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
     try:
         descriptor = os.open(str(path), flags)
@@ -488,6 +502,8 @@ def _upload(root, store, payload):
     try:
         with os.fdopen(descriptor, 'wb') as stream:
             stream.write(content)
+        from .remote_files import persist_file
+        persist_file(root, directory / resume_id)
         store.put(RESUME_KIND, resume_id, record)
     except BaseException:
         (directory / resume_id).unlink(missing_ok=True)

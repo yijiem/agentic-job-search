@@ -15,7 +15,8 @@ def add_parser(commands):
     serve.add_argument('--host', default='127.0.0.1')
     serve.add_argument('--port', type=int, default=int(os.environ.get('PORT', '8765')))
     serve.add_argument('--origin', default=os.environ.get('JOBFLOW_PUBLIC_ORIGIN'))
-    serve.add_argument('--no-worker', action='store_true', help='Run a separate worker on the same disk')
+    serve.add_argument('--no-worker', action='store_true',
+                       help='Disable the embedded worker (always disabled with Supabase persistence)')
     invite = actions.add_parser('invite', help='Allow an email to sign in; sends no message')
     invite.add_argument('--email', required=True)
     adopt = actions.add_parser('adopt', help='Attach an existing workspace to one invited email')
@@ -24,7 +25,7 @@ def add_parser(commands):
     actions.add_parser('accounts', help='List invited accounts and workspace IDs')
     export = actions.add_parser('export-owner', help='Create a consistent private migration snapshot')
     export.add_argument('--output', type=Path, required=True)
-    worker = actions.add_parser('worker', help='Process queued and due searches on the same persistent disk')
+    worker = actions.add_parser('worker', help='Process queued and due searches using the configured persistence backend')
     worker.add_argument('--once', action='store_true')
 
 
@@ -38,9 +39,11 @@ def main(args):
         return
     if args.cloud_command == 'serve':
         from .cloud import serve
+        from .remote import enabled
         if not 1 <= args.port <= 65535:
             raise ValueError('--port must be between 1 and 65535.')
-        serve(args.cloud_root, args.host, args.port, args.origin, worker=not args.no_worker)
+        serve(args.cloud_root, args.host, args.port, args.origin,
+              worker=not args.no_worker and not enabled())
         return
     accounts = Accounts(args.cloud_root)
     if args.cloud_command == 'invite':

@@ -10,6 +10,14 @@ def utcnow():
 
 
 class Store:
+    def __new__(cls, path):
+        if cls is Store:
+            from .remote import workspace_id
+            if workspace_id(Path(path).parent.parent):
+                from .remote_store import RemoteStore
+                return RemoteStore(path)
+        return super().__new__(cls)
+
     def __init__(self, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path), timeout=30)

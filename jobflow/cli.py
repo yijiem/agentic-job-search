@@ -5,6 +5,7 @@ import hashlib
 import json
 import shutil
 import sys
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -23,11 +24,13 @@ def parser():
     result = argparse.ArgumentParser(description='Evidence-grounded multi-agent job search')
     result.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
     result.add_argument('--hosted', action='store_true', help=argparse.SUPPRESS)
+    result.add_argument('--hosted-interactive', action='store_true', help=argparse.SUPPRESS)
     commands = result.add_subparsers(dest='command', required=True)
     from .cloud_cli import add_parser as add_cloud_parser
     add_cloud_parser(commands)
     commands.add_parser('init', help='Create local configuration and database')
     commands.add_parser('rematch', help='Recalculate matches and plans from saved jobs without polling sources')
+    commands.add_parser('refresh', help='Refresh preparation and reports without polling or rescoring jobs')
     web = commands.add_parser('web', help='Open the local job-search web application')
     web.add_argument('--port', type=int, default=8765, help='Loopback port (default: 8765)')
     web.add_argument('--open', action='store_true', help='Open the application in your browser')
@@ -143,6 +146,15 @@ def update_tracking(store, kind, rows, config, profile):
 def dispatch(args, store, config, profile):
     root = args.root
     command = args.command
+    interactive = getattr(args, 'hosted_interactive', False)
+    if interactive:
+        from .remote import workspace_id
+        if not getattr(args, 'hosted', False) or not workspace_id(root):
+            raise ValueError('Interactive cloud execution requires a remote hosted workspace.')
+        if command not in ('application', 'task', 'interview', 'import', 'batch', 'agent', 'personalize', 'prep'):
+            raise ValueError('This operation belongs in the background worker.')
+        if command == 'import' and args.kind == 'jobs':
+            raise ValueError('Job ingestion belongs in the background worker.')
     if getattr(args, 'hosted', False):
         # Account-level model credentials are a separate future integration.
         # Never silently spend a process owner's API key for another account.
@@ -162,7 +174,8 @@ def dispatch(args, store, config, profile):
         if result.get('applied'):
             try:
                 coach(store, config)
-                write_reports(root, store, config)
+                if not interactive:
+                    write_reports(root, store, config)
             except (ValueError, OSError, RuntimeError, KeyError):
                 result['warning'] = 'Plan saved. Refresh coaching and reports with the CLI.'
         print(json.dumps(result, ensure_ascii=False))
@@ -191,7 +204,8 @@ def dispatch(args, store, config, profile):
             try:
                 prepare(store, config, profile)
                 coach(store, config)
-                write_reports(root, store, config)
+                if not interactive:
+                    write_reports(root, store, config)
             except (ValueError, OSError, RuntimeError, KeyError):
                 # The receipt and application were committed together already;
                 # report projection errors must never invite a second submit.
@@ -205,13 +219,17 @@ def dispatch(args, store, config, profile):
     elif command == 'rematch':
         from .matching import match_job
         jobs = store.all('jobs')
+        job_count = len(jobs)
         store.put_many('jobs', [{**job, **match_job(job, profile, config)} for job in jobs])
+        del jobs
         # Preserve previous drafts, but make their older profile basis explicit.
         store.put_many('packets', [{**packet, 'needs_profile_review': True}
                                   for packet in store.all('packets')])
         prepare(store, config, profile)
-        coach(store, config)
-        print('Updated matches for %s saved jobs; no sources polled.' % len(jobs))
+        print('Updated matches for %s saved jobs; no sources polled.' % job_count)
+    elif command == 'refresh':
+        prepare(store, config, profile)
+        print('Refreshed preparation from saved records.')
     elif command == 'personalize':
         if args.limit is not None and args.limit < 1:
             raise ValueError('--limit must be positive.')
@@ -342,8 +360,9 @@ def dispatch(args, store, config, profile):
         store.put('candidates', key, {**result, 'id': key, 'status': 'proposed', 'created_at': utcnow()})
         atomic_write(root / 'reports/discovery.md', result['text'] + '\n')
         print('Saved discovery brief; subscribe verified candidates with source-add.')
-    path = write_reports(root, store, config)
-    print('Review: ' + str(path))
+    if not interactive:
+        path = write_reports(root, store, config)
+        print('Review: ' + str(path))
 
 
 def main(argv=None):
@@ -381,7 +400,8 @@ def main(argv=None):
     (args.root / 'data').mkdir(parents=True, exist_ok=True)
     store = None
     try:
-        with (args.root / 'data/workflow.lock').open('a') as lock:
+        from .remote_interactive import execution_context, InteractiveStore
+        with execution_context(args.root), (args.root / 'data/workflow.lock').open('a') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -391,7 +411,17 @@ def main(argv=None):
             if args.command == 'search':
                 selected_sources(config, args.source_ids)
             store = Store(args.root / 'data/jobflow.sqlite3')
-            dispatch(args, store, config, profile)
+            if getattr(args, 'hosted_interactive', False):
+                store = InteractiveStore(store)
+            # Retain one worker-scoped record cache across matching, coaching,
+            # and report generation to avoid repeated full network downloads.
+            batch = store.batch() if hasattr(store, 'batch') else nullcontext()
+            with batch:
+                dispatch(args, store, config, profile)
+            from .remote import workspace_id
+            if workspace_id(args.root) and not getattr(args, 'hosted_interactive', False):
+                from .remote_files import prune_unreferenced
+                prune_unreferenced(args.root)
     except (ValueError, OSError, RuntimeError, KeyError) as exc:
         print('Error: ' + str(exc), file=sys.stderr)
         raise SystemExit(1)

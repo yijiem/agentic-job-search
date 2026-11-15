@@ -72,6 +72,12 @@ def _account(row):
 
 
 class Accounts:
+    def __new__(cls, root):
+        if cls is Accounts and os.environ.get('JOBFLOW_BACKEND') == 'supabase':
+            from .remote_accounts import RemoteAccounts
+            return RemoteAccounts(root)
+        return super().__new__(cls)
+
     def __init__(self, root):
         supplied = Path(root).expanduser()
         if supplied.is_symlink():

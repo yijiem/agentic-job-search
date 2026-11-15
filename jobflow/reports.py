@@ -21,6 +21,24 @@ def atomic_write(path, content):
     temporary = path.with_suffix(path.suffix + '.tmp')
     temporary.write_text(content, encoding='utf-8')
     os.replace(temporary, path)
+    from .remote_files import persist_path
+    persist_path(path)
+
+
+def atomic_json(path, value):
+    """Stream large exports instead of constructing a second full JSON string."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    try:
+        with temporary.open('w', encoding='utf-8') as stream:
+            json.dump(value, stream, indent=2, ensure_ascii=False)
+            stream.write('\n')
+        os.replace(temporary, path)
+        from .remote_files import persist_path
+        persist_path(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def cell(value):
@@ -193,7 +211,9 @@ def write_reports(root, store, config):
     all_jobs = [{**job, 'levels_fyi': salary_reference(job, salary_index),
                  'office_locations': office_locations(job, locations)} for job in all_jobs]
     by_id = {job['id']: job for job in all_jobs}
-    jobs = [by_id[job['id']] for job in ranked_jobs(store, config)]
+    jobs = sorted([job for job in all_jobs if job.get('availability') != 'closed'
+                   and job.get('eligible') and job.get('score', 0) >= config['search']['min_score']],
+                  key=lambda job: (-job['score'], job.get('company', ''), job['title']))
     matching_ids = {job['id'] for job in jobs}
     packets = sorted(store.all('packets'), key=lambda p: (
         p.get('company', '').casefold(), p.get('title', '').casefold(), p['id']))
@@ -253,7 +273,7 @@ def write_reports(root, store, config):
         atomic_write(output / 'coaching' / (key + '.md'), snapshot['markdown'])
     for kind in ('jobs', 'applications', 'interviews', 'tasks', 'activities', 'source_health', 'contacts', 'research', 'candidates'):
         rows = all_jobs if kind == 'jobs' else store.all(kind)
-        atomic_write(output / (kind + '.json'), json.dumps(rows, indent=2, ensure_ascii=False) + '\n')
+        atomic_json(output / (kind + '.json'), rows)
     research_lines = ['# Research notes', '', 'Public leads and interview anecdotes require review; they do not establish personal connections.', '']
     for note in store.all('research'):
         research_lines += ['## ' + note.get('role', 'Imported note'), '', note.get('retrieved_at', ''), '', note['text'], '']

@@ -20,6 +20,9 @@ from .cloud_accounts import Accounts
 from .cloud_auth import AuthError, PendingSignIns, RateLimiter, SupabaseEmailAuth
 from .cloud_jobs import WorkQueue, worker_loop
 from .onboarding import initialize_workspace, onboarding_state, save_onboarding, upload_resume
+from .remote import enabled as remote_enabled, RemoteError, RemoteBusyError
+from .remote_interactive import execution_context
+from .remote_files import hydrate_workspace
 from .web import (ASSET_DIRECTORY, STATIC_ASSETS, MAX_REQUEST_BYTES, MAX_UPLOAD_REQUEST_BYTES,
                   JobflowHandler, WebError, app_build, browser_worker_archive, job_detail,
                   perform_action, profile_summary, snapshot, validate_action_size)
@@ -60,6 +63,9 @@ class CloudServer(ThreadingHTTPServer):
         self.cookie_name = '__Host-jobflow' if self.secure_cookie else 'jobflow_local_session'
         self.pending_cookie_name = '__Host-jobflow-pkce' if self.secure_cookie else 'jobflow_local_pkce'
         self.pending_signins = PendingSignIns()
+        if remote_enabled():
+            from .remote_auth_state import RemotePendingSignIns
+            self.pending_signins = RemotePendingSignIns()
         self.root = Path(root).resolve()
         self.accounts = Accounts(self.root)
         self.queue = WorkQueue(self.root)
@@ -67,13 +73,16 @@ class CloudServer(ThreadingHTTPServer):
         self.asset_directory = Path(asset_directory).resolve()
         self.sources = source_template(self.root)
         self.limiter = RateLimiter()
+        if remote_enabled():
+            from .remote_auth_state import RemoteRateLimiter
+            self.limiter = RemoteRateLimiter()
         self.locks = {}
         self.locks_guard = threading.Lock()
-        self.request_slots = threading.BoundedSemaphore(16)
+        self.request_slots = threading.BoundedSemaphore(2 if remote_enabled() else 16)
         super().__init__(address, CloudHandler)
 
     def process_request(self, request, client_address):
-        if not self.request_slots.acquire(blocking=False):
+        if not self.request_slots.acquire(timeout=10 if remote_enabled() else 0):
             # Bound memory/thread use on the public transport. Managed ingress
             # supplies the external TLS endpoint; all responses remain private.
             try:
@@ -96,11 +105,22 @@ class CloudServer(ThreadingHTTPServer):
 
     def account_lock(self, account_id):
         with self.locks_guard:
-            return self.locks.setdefault(account_id, threading.Lock())
+            return self.locks.setdefault(account_id, threading.RLock())
 
 
 class CloudHandler(JobflowHandler):
     server_version = 'Jobflow'
+
+    def handle_one_request(self):
+        # Lazy remote downloads update the local cache too. Keep the entire
+        # request inside the same account lock as cache writes and publication.
+        self._held_account_locks = {}
+        try:
+            return super().handle_one_request()
+        finally:
+            for lock in self._held_account_locks.values():
+                lock.release()
+            self._held_account_locks = {}
 
     def send_header(self, keyword, value):
         if keyword.casefold() == 'referrer-policy' and getattr(self, 'auth_callback_response', False):
@@ -154,10 +174,18 @@ class CloudHandler(JobflowHandler):
             raise WebError('Sign in to open your workspace.', 401)
         return session, token
 
-    def _root(self, account):
+    def _root(self, account, hydrate=True):
         # Only a server-side account record can select a workspace. Client
         # account IDs, URL paths, and request bodies never participate in routing.
-        return self.server.accounts.workspace(account)
+        if remote_enabled() and account['id'] not in self._held_account_locks:
+            lock = self.server.account_lock(account['id'])
+            if not lock.acquire(timeout=10):
+                raise WebError('Another workspace request is running. Please retry shortly.', 409)
+            self._held_account_locks[account['id']] = lock
+        root = self.server.accounts.workspace(account)
+        if hydrate:
+            hydrate_workspace(root)
+        return root
 
     def _account_state(self, session):
         if not session:
@@ -253,7 +281,13 @@ class CloudHandler(JobflowHandler):
                     return
                 raise WebError('Sign in to open your workspace.', 401)
             account = session['account']
-            root = self._root(account)
+            if path == '/api/background':
+                self._respond(200, {'background_job': self.server.queue.status(account['id'])})
+                return
+            if path == '/api/version':
+                self._respond(200, {'app_build': app_build(self.server.asset_directory)})
+                return
+            root = self._root(account, hydrate=path.startswith('/api/'))
             if path == '/api/onboarding':
                 self._respond(200, onboarding_state(root))
             elif path == '/api/state':
@@ -263,8 +297,6 @@ class CloudHandler(JobflowHandler):
                     'account': {'email': account['email'], 'hosted': True},
                     'background_job': self.server.queue.status(account['id']),
                     'app_build': app_build(self.server.asset_directory)})
-            elif path == '/api/version':
-                self._respond(200, {'app_build': app_build(self.server.asset_directory)})
             elif path == '/api/profile':
                 self._respond(200, profile_summary(root))
             elif path == '/api/batches':
@@ -309,6 +341,8 @@ class CloudHandler(JobflowHandler):
                 self._asset('index.html' if path == '/' else path.lstrip('/'))
         except (WebError, ValueError, KeyError, TypeError) as error:
             self._error(error)
+        except RemoteError:
+            self._respond(503, {'error': 'Your private workspace is temporarily unavailable. Please retry shortly.'})
         except (OSError, sqlite3.Error):
             self._respond(500, {'error': 'Your workspace could not be read. Please try again.'})
 
@@ -353,8 +387,11 @@ class CloudHandler(JobflowHandler):
     def _complete_signin(self, identity):
         account = self.server.accounts.authenticate_identity(identity['id'], identity['email'])
         root = self._root(account)
-        initialize_workspace(root, sources=self.server.sources)
-        (root / 'config/hosted.json').write_text('{"version": 1}\n')
+        with execution_context(root):
+            hydrate_workspace(root)
+            initialize_workspace(root, sources=self.server.sources)
+            from .reports import atomic_write
+            atomic_write(root / 'config/hosted.json', '{"version": 1}\n')
         # Rotate any prior app session rather than retaining a fixed login token.
         unused, old_token = self._session(required=False)
         if old_token:
@@ -383,7 +420,7 @@ class CloudHandler(JobflowHandler):
             if str(identity.get('email', '')).casefold() != email:
                 raise AuthError('The sign-in provider did not confirm this email address.')
             self._complete_signin(identity)
-        except (AuthError, ValueError, KeyError, TypeError):
+        except (AuthError, ValueError, KeyError, TypeError, RemoteError):
             # Never echo provider error text, authorization codes, or email data.
             self._set_pending_cookie('', expire=True)
             self._redirect('/account?signin=retry')
@@ -421,37 +458,45 @@ class CloudHandler(JobflowHandler):
             if not lock.acquire(blocking=False):
                 raise WebError('Another update is being saved. Please try again shortly.', 409)
             try:
-                if path == '/api/onboarding':
-                    before = onboarding_state(root)
-                    result = save_onboarding(root, payload)
-                    self.server.accounts.mark_onboarding_complete(account)
-                    if not before['complete']:
+                with execution_context(root):
+                    hydrate_workspace(root)
+                    if path == '/api/onboarding':
+                        before = onboarding_state(root)
+                        result = save_onboarding(root, payload)
+                        self.server.accounts.mark_onboarding_complete(account)
+                        if not before['complete']:
+                            self.server.queue.enqueue(account['id'], 'run')
+                        elif (before['profile'] != result['profile'] or before['preferences'] != result['preferences']):
+                            self.server.queue.enqueue(account['id'], 'rematch')
+                    elif path == '/api/resume':
+                        encoded = payload.get('content_base64')
+                        if not isinstance(encoded, str):
+                            raise WebError('Upload a file as base64 text.')
+                        try:
+                            content = base64.b64decode(encoded, validate=True)
+                        except (ValueError, binascii.Error):
+                            raise WebError('The uploaded file could not be decoded.') from None
+                        result = upload_resume(root, payload.get('filename', ''), content)
+                    elif path == '/api/search':
+                        if not onboarding_state(root)['complete']:
+                            raise WebError('Complete your profile before starting a search.', 409)
+                        if not self.server.limiter.allow('search:' + account['id'], 3, 3600):
+                            raise WebError('Please wait before starting another search.', 429)
                         self.server.queue.enqueue(account['id'], 'run')
-                    elif (before['profile'] != result['profile'] or before['preferences'] != result['preferences']):
-                        self.server.queue.enqueue(account['id'], 'rematch')
-                elif path == '/api/resume':
-                    encoded = payload.get('content_base64')
-                    if not isinstance(encoded, str):
-                        raise WebError('Upload a file as base64 text.')
-                    try:
-                        content = base64.b64decode(encoded, validate=True)
-                    except (ValueError, binascii.Error):
-                        raise WebError('The uploaded file could not be decoded.') from None
-                    result = upload_resume(root, payload.get('filename', ''), content)
-                elif path == '/api/search':
-                    if not onboarding_state(root)['complete']:
-                        raise WebError('Complete your profile before starting a search.', 409)
-                    if not self.server.limiter.allow('search:' + account['id'], 3, 3600):
-                        raise WebError('Please wait before starting another search.', 429)
-                    self.server.queue.enqueue(account['id'], 'run')
-                    result = {'background_job': self.server.queue.status(account['id'])}
-                else:
-                    if not onboarding_state(root)['complete']:
-                        raise WebError('Complete your profile before saving workspace changes.', 409)
-                    result = perform_action(root, payload)
+                        result = {'background_job': self.server.queue.status(account['id'])}
+                    else:
+                        if not onboarding_state(root)['complete']:
+                            raise WebError('Complete your profile before saving workspace changes.', 409)
+                        result = perform_action(root, payload)
+                        if remote_enabled():
+                            self.server.queue.enqueue(account['id'], 'refresh')
             finally:
                 lock.release()
             self._respond(200, result)
+        except RemoteBusyError:
+            self._respond(409, {'error': 'Another workspace update is running. Please retry shortly.'})
+        except RemoteError:
+            self._respond(503, {'error': 'Your private workspace could not save this change. Please retry shortly.'})
         except AuthError:
             self._respond(401, {'error': 'Sign-in could not be completed. Request a fresh sign-in email and try again.'})
         except (WebError, ValueError, KeyError, TypeError) as error:

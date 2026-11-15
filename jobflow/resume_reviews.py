@@ -330,6 +330,8 @@ def _save_pdf(root, store, review, payload):
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        from .remote_files import persist_file
+        persist_file(root, path)
         store.put_groups(groups)
     except BaseException:
         path.unlink(missing_ok=True)

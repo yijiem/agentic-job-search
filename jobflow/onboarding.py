@@ -66,6 +66,8 @@ def _root_path(root):
 
 
 def _read_json(path, default=None):
+    from .remote_files import ensure_path
+    path = ensure_path(path)
     if path.is_symlink():
         raise ValueError('Workspace files cannot be symbolic links.')
     if not path.exists():
@@ -88,6 +90,8 @@ def _write_private(path, content):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        from .remote_files import persist_path
+        persist_path(path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -99,6 +103,12 @@ def _json_bytes(value):
 
 @contextmanager
 def _workspace_lock(root):
+    from .remote_files import is_remote_root
+    if is_remote_root(root):
+        from .remote import RemoteLease
+        with RemoteLease(root):
+            yield
+        return
     (root / 'data').mkdir(parents=True, exist_ok=True, mode=0o700)
     path = root / 'data/workflow.lock'
     if path.is_symlink():
@@ -173,6 +183,8 @@ def initialize_workspace(root, sources=None):
     root = _root_path(root)
     template = _source_template(sources) if sources is not None else None
     with _workspace_lock(root):
+        from .remote_files import hydrate_workspace, is_remote_root
+        hydrate_workspace(root)
         config_directory = root / 'config'
         config_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         settings_path = config_directory / 'settings.json'
@@ -194,7 +206,8 @@ def initialize_workspace(root, sources=None):
             raise ValueError('Workspace files cannot be symbolic links.')
         if not database.exists():
             Store(database).close()
-            os.chmod(database, 0o600)
+            if not is_remote_root(root):
+                os.chmod(database, 0o600)
     return onboarding_state(root)
 
 
@@ -208,6 +221,8 @@ def _preferences(settings):
 
 
 def _uploads(root):
+    from .remote_files import hydrate_upload_metadata
+    hydrate_upload_metadata(root)
     directory = root / 'inputs/resumes'
     if not directory.exists():
         return []
@@ -373,6 +388,12 @@ def upload_resume(root, filename, content_bytes):
         existing_uploads = sum(bool(re.fullmatch(r'[a-f0-9]{32}\.json', path.name))
                                for path in files if path.is_file())
         stored_bytes = sum(path.stat().st_size for path in files if path.is_file())
+        from .remote_files import is_remote_root, file_manifest
+        if is_remote_root(root):
+            durable = file_manifest(root, 'inputs/resumes/')
+            existing_uploads = sum(bool(re.fullmatch(r'inputs/resumes/[a-f0-9]{32}\.json', row['path']))
+                                   for row in durable)
+            stored_bytes = sum(row['size'] for row in durable)
         metadata_bytes = _json_bytes(value)
         if existing_uploads >= MAX_RESUME_UPLOADS:
             raise ValueError('This workspace has reached its limit of %s resume uploads.' % MAX_RESUME_UPLOADS)

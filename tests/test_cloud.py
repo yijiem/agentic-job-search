@@ -100,7 +100,7 @@ class CloudHTTPTests(unittest.TestCase):
         return account, root
 
     def test_unauthenticated_private_apis_denied_and_home_redirects(self):
-        for path in ('/api/state', '/api/onboarding', '/api/profile', '/api/jobs/shared-id', '/api/version', '/app.js',
+        for path in ('/api/state', '/api/onboarding', '/api/profile', '/api/jobs/shared-id', '/api/version', '/api/background', '/app.js',
                      '/my-account.js', '/my-account.css',
                      '/api/batches', '/api/resumes', '/api/resumes/unknown',
                      '/api/resume-reviews', '/api/resume-reviews/unknown', '/pdf-review.js',
@@ -118,6 +118,17 @@ class CloudHTTPTests(unittest.TestCase):
         self.assertEqual(status, 303)
         self.assertEqual(headers['Location'], '/account')
         self.assertEqual(self.request('GET', '/api/account')[2], {'authenticated': False})
+
+    def test_lightweight_polling_does_not_hydrate_private_workspace(self):
+        self.seed('owner@example.com', 'Owner')
+        cookie, unused, data = self.login('owner@example.com')
+        with patch('jobflow.cloud.CloudHandler._root', side_effect=AssertionError('poll hydrated workspace')):
+            status, unused, data = self.request('GET', '/api/background', cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertIn('background_job', data)
+            status, unused, data = self.request('GET', '/api/version', cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertIn('app_build', data)
         self.assertEqual(self.request('POST', '/api/action', {'action': 'prep'})[0], 401)
 
     def test_profile_api_uses_signed_in_workspace_and_filters_private_metadata(self):

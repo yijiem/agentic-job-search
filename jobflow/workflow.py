@@ -2,6 +2,7 @@
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,6 +31,8 @@ def validate_daily_goals(config):
 
 def load_config(root):
     root = Path(root)
+    from .remote_files import hydrate_workspace
+    hydrate_workspace(root)
     config = json.loads((root / 'config/settings.json').read_text())
     profile = json.loads((root / 'config/profile.json').read_text())
     schedule = config['schedule']
@@ -103,6 +106,12 @@ def selected_sources(config, source_ids=None):
 
 
 def search(store, config, profile, source_ids=None):
+    batch = store.batch(preload=('jobs',)) if hasattr(store, 'batch') else nullcontext()
+    with batch:
+        return _search(store, config, profile, source_ids)
+
+
+def _search(store, config, profile, source_ids=None):
     active = selected_sources(config, source_ids)
     scope = {s['id'] for s in active} if source_ids is not None else None
     results = {'new_jobs': 0, 'fetched_jobs': 0, 'source_errors': {}, 'manual_sources': []}
@@ -119,7 +128,7 @@ def search(store, config, profile, source_ids=None):
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(fetch_source, source): source for source in feeds}
         for future in as_completed(futures):
-            source = futures[future]
+            source = futures.pop(future)
             checked_at = utcnow()
             try:
                 jobs = future.result()

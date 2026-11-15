@@ -74,7 +74,21 @@ function updateHostedChrome() {
   status.textContent = job ? (job.status === 'pending' ? 'Your workspace update is queued.' : job.status === 'running' ? 'Updating your matches and daily plan…' : job.message || '') : '';
   status.classList.toggle('needs-attention', Boolean(job && ['failed','partial'].includes(job.status)));
   clearTimeout(state.backgroundTimer);
-  if (hosted && job && ['pending','running'].includes(job.status)) state.backgroundTimer = setTimeout(() => refresh(), 10000);
+  if (hosted && job && ['pending','running'].includes(job.status)) state.backgroundTimer = setTimeout(pollBackground, 15000);
+}
+async function pollBackground() {
+  if (!state.data?.account?.hosted) return;
+  try {
+    const response = await fetch('/api/background', {cache:'no-store'});
+    if (response.status === 401) { location.assign('/account'); return; }
+    if (!response.ok) throw new Error('Background status is temporarily unavailable.');
+    const result = await response.json();
+    state.data.background_job = result.background_job;
+    if (result.background_job && ['pending','running'].includes(result.background_job.status)) updateHostedChrome();
+    else await refresh();
+  } catch {
+    state.backgroundTimer = setTimeout(pollBackground, 30000);
+  }
 }
 async function startCloudSearch() {
   const button = $('#cloud-search');

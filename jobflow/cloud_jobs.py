@@ -15,8 +15,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .onboarding import onboarding_state
+from .remote import RemoteError
 
-PRIORITY = {'due': 0, 'rematch': 1, 'run': 2}
+PRIORITY = {'due': 0, 'refresh': 1, 'rematch': 2, 'run': 3}
 LEASE_SECONDS = 1900
 WORKFLOW_TIMEOUT = 1800
 MAX_ATTEMPTS = 3
@@ -27,6 +28,12 @@ def _stronger(first, second):
 
 
 class WorkQueue:
+    def __new__(cls, root):
+        if cls is WorkQueue and os.environ.get('JOBFLOW_BACKEND') == 'supabase':
+            from .remote_jobs import RemoteWorkQueue
+            return RemoteWorkQueue(root)
+        return super().__new__(cls)
+
     def __init__(self, root):
         self.path = Path(root) / 'data/cloud_jobs.sqlite3'
         if self.path.is_symlink() or self.path.parent.is_symlink():
@@ -155,6 +162,9 @@ class WorkQueue:
 
 
 def _report_outcome(root):
+    from .remote_files import ensure_file
+    ensure_file(root, 'reports/source_health.json')
+    ensure_file(root, 'reports/runs.json')
     """Missing or malformed source evidence never establishes a healthy run."""
     health_path, runs_path = root / 'reports/source_health.json', root / 'reports/runs.json'
     if not health_path.is_file() or not runs_path.is_file():
@@ -179,13 +189,15 @@ def run_item(accounts, queue, item):
             queue.finish(item, 'failed', 'This account is unavailable.')
             return
         root = accounts.workspace(account)
+        from .remote_files import hydrate_workspace
+        hydrate_workspace(root)
         if not onboarding_state(root)['complete']:
             queue.finish(item, 'failed', 'Complete your profile before starting a search.')
             return
         if item['command'] not in PRIORITY:
             queue.finish(item, 'failed', 'This background command is unavailable.')
             return
-    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+    except (OSError, sqlite3.Error, RemoteError, ValueError, KeyError, TypeError):
         queue.finish(item, 'failed', 'The workspace configuration needs attention before background work can continue.')
         return
     command = [sys.executable, '-m', 'jobflow', '--root', str(root), '--hosted',
@@ -203,12 +215,12 @@ def run_item(accounts, queue, item):
             queue.finish(item, 'retry', 'The workflow failed. Check the workspace configuration and source health.')
         elif item['command'] == 'due' and result.stdout.strip() == 'Not due; no changes.':
             queue.finish(item, 'done', 'The next search follows your saved schedule.')
-        elif item['command'] == 'rematch':
+        elif item['command'] in ('rematch', 'refresh'):
             queue.finish(item, 'done', 'Matches and preparation updated from your saved profile.')
         else:
             status, message = _report_outcome(root)
             queue.finish(item, status, message)
-    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, KeyError):
+    except (OSError, RemoteError, subprocess.TimeoutExpired, ValueError, TypeError, KeyError):
         queue.finish(item, 'retry', 'The background workflow could not finish; retrying shortly.')
 
 
@@ -219,15 +231,18 @@ def worker_loop(accounts, queue, stop, once=False):
             next_schedule = time.monotonic() + 3600
             try:
                 account_rows = accounts.list_accounts()
-            except (OSError, sqlite3.Error, ValueError):
+            except (OSError, sqlite3.Error, RemoteError, ValueError):
                 account_rows = []
                 next_schedule = time.monotonic() + 60
             for account in account_rows:
                 if account.get('status') != 'active':
                     continue
                 try:
-                    complete = onboarding_state(accounts.workspace(account))['complete']
-                except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+                    root = accounts.workspace(account)
+                    from .remote_files import hydrate_workspace
+                    hydrate_workspace(root)
+                    complete = onboarding_state(root)['complete']
+                except (OSError, sqlite3.Error, RemoteError, ValueError, KeyError, TypeError):
                     # Queue one item so the user gets an actionable failed state,
                     # and continue scheduling every other account.
                     complete = True

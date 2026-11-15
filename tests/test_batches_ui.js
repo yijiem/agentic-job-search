@@ -6,9 +6,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname,'../jobflow/web_assets/batches.js'),'utf8');
 function harness(data) {
-  const listeners={},writes=[],maintenanceWrites=[],posts=[],nodes=new Map(),timers=[],dialogs=[],copied=[],tailoring=[],stats={renders:0};
+  const listeners={},writes=[],maintenanceWrites=[],posts=[],reads=[],nodes=new Map(),timers=[],timerDelays=[],dialogs=[],copied=[],tailoring=[],stats={renders:0};
   const document={addEventListener(name,callback){listeners[name]=callback;},querySelector(selector){return nodes.get(selector)||null;}};
-  const context=vm.createContext({URL,Intl,Date,Set,Map,document,navigator:{clipboard:{async writeText(text){copied.push(text);}}},window:{confirm:()=>true},setTimeout(callback){timers.push(callback);return timers.length;},clearTimeout(){},fetch:async(url,options={})=>{
+  const context=vm.createContext({URL,Intl,Date,Set,Map,document,navigator:{clipboard:{async writeText(text){copied.push(text);}}},window:{confirm:()=>true},setTimeout(callback,delay){timers.push(callback);timerDelays.push(delay);return timers.length;},clearTimeout(){},fetch:async(url,options={})=>{
     if(options.method==='POST'){
       const payload=JSON.parse(options.body);posts.push({payload,headers:options.headers});
       (payload.op==='resume_sync'?maintenanceWrites:writes).push(payload);
@@ -22,11 +22,11 @@ function harness(data) {
       if(payload.op==='codex_discard')delete data.batches.find(value=>value.id===payload.batch_id).codex_run;
       return {ok:true,json:async()=>({ok:true,batch:data.batches[0]})};
     }
-    return {ok:true,json:async()=>JSON.parse(JSON.stringify(data))};
+    reads.push(url);return {ok:true,json:async()=>JSON.parse(JSON.stringify(data))};
   }});
   vm.runInContext(source,context,{filename:'batches.js'});
   const api=context.window.JobflowBatches;
-  return {api,listeners,writes,maintenanceWrites,posts,nodes,context,dialogs,copied,tailoring,timers,stats,document,async load(workspace){api.render(workspace);api.mount({render(){stats.renders++;},toast(){},showDialog(html){dialogs.push(html);},startResumes(ids,options){tailoring.push({ids:Array.from(ids),options});},csrfToken:'fixture'});await new Promise(resolve=>setImmediate(resolve));return api.render(workspace);}};
+  return {api,listeners,writes,maintenanceWrites,posts,reads,nodes,context,dialogs,copied,tailoring,timers,timerDelays,stats,document,async load(workspace){api.render(workspace);api.mount({render(){stats.renders++;},toast(){},showDialog(html){dialogs.push(html);},startResumes(ids,options){tailoring.push({ids:Array.from(ids),options});},csrfToken:'fixture'});await new Promise(resolve=>setImmediate(resolve));return api.render(workspace);}};
 }
 const job=(id,fields={})=>({id,company:'Example',title:'Engineer '+id,score:90,availability:'open',eligible:true,url:'https://jobs.example.com/'+id,first_seen_date:'2026-11-14',...fields});
 const workspace={jobs:[job('one'),job('two',{score:99}),job('three',{score:92}),job('four',{availability:'missing'}),job('five',{company:'Elsewhere'})],applications:[{job_id:'two',stage:'technical'}],selected:['one'],today:'2026-11-14'};
@@ -34,6 +34,36 @@ const snapshot=()=>({csrf_token:'token',workspace_id:'workspace',codex:{availabl
 const batchClick=(action,extras={})=>({target:{closest:()=>({dataset:{batchAction:action,...extras}})}});
 const codexButton=html=>html.match(/<button\b[^>]*data-batch-action="codex-review"[^>]*>/)?.[0];
 async function main(){
+  {
+    const data=snapshot();data.codex={available:false,reason:'Use the local workspace for Codex.'};
+    const app=harness(data),hosted={...workspace,account:{hosted:true}};
+    await app.load(hosted);
+    assert.equal(app.timers.length,0,'Hosted mode does not schedule full batch snapshots');
+    const before=app.reads.length;
+    await app.listeners.click(batchClick('reload'));
+    assert.equal(app.reads.length,before+2,'Explicit refresh still restores resumes and reads the current hosted batch');
+    const review={dataset:{batchReview:'one'}};
+    app.listeners.input({target:{dataset:{batchAnswer:'work',answerType:'select'},value:'No',closest(selector){return selector==='[data-batch-review]'?review:null;},hasAttribute(){return false;}},type:'input'});
+    data.batches[0].revision++;
+    await app.listeners.click(batchClick('reload'));
+    assert.match(app.api.render(hosted),/value="No" selected/,'Explicit hosted refresh retains unsaved answers');
+  }
+  {
+    const data=snapshot();data.codex={available:false};
+    const app=harness(data);await app.load(workspace);
+    const before=app.reads.length;
+    await app.timers[0]();
+    assert.equal(app.reads.length,before,'A snapshot reporting Codex unavailable cancels an already scheduled poll');
+    assert.equal(app.timers.length,1,'Unavailable Codex does not reschedule polling');
+  }
+  {
+    const app=harness(snapshot());await app.load(workspace);
+    const before=app.reads.length;
+    assert.equal(app.timerDelays[0],5000,'Local Codex polling retains the five-second cadence');
+    await app.timers[0]();
+    assert.equal(app.reads.length,before+1);
+    assert.equal(app.timerDelays.at(-1),5000);
+  }
   {
     const {api}=harness(snapshot());
     const selection=api.selectRoles(workspace,{preset:'company',company:'Example',count:2},[],[]);

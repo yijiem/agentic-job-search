@@ -77,6 +77,10 @@ class WebError(ValueError):
 
 def _read_records(root, job_mode="matching", minimum=40, job_id=None):
     """Read a consistent SQLite snapshot without creating or changing anything."""
+    from .remote import workspace_id
+    if workspace_id(root):
+        from .remote_store import read_records
+        return read_records(root, job_mode=job_mode, minimum=minimum, job_id=job_id)
     path = Path(root) / 'data/jobflow.sqlite3'
     records = defaultdict(list)
     if not path.exists():
@@ -258,10 +262,16 @@ def _text(payload, key, maximum=10000):
 def _run_cli(root, arguments, full_output=False):
     prefix = [sys.executable, '-m', 'jobflow', '--root', str(Path(root).resolve())]
     environment = None
-    if (Path(root) / 'config/hosted.json').is_file():
+    from .remote import workspace_id, lease_environment
+    remote_workspace = workspace_id(root)
+    if remote_workspace or (Path(root) / 'config/hosted.json').is_file():
         prefix.append('--hosted')
         environment = dict(os.environ)
         environment.pop('OPENAI_API_KEY', None)
+        if remote_workspace:
+            prefix.append('--hosted-interactive')
+            environment = lease_environment(root)
+            environment.pop('OPENAI_API_KEY', None)
     result = subprocess.run(prefix + arguments,
                             cwd=str(Path(__file__).resolve().parents[1]), capture_output=True,
                             text=True, timeout=180, check=False, env=environment)
@@ -312,7 +322,8 @@ def _batch_action(root, payload):
     if isinstance(op, str) and op.startswith('codex_'):
         if op not in ('codex_prepare', 'codex_discard'):
             raise WebError('Codex run operations are available only through the local Jobflow CLI.', 403)
-        if (Path(root) / 'config/hosted.json').is_file():
+        from .remote import workspace_id
+        if workspace_id(root) or (Path(root) / 'config/hosted.json').is_file():
             raise WebError('Open your local Jobflow workspace to run applications with Codex on this computer.', 409)
     result = _json_action(root, payload, 'batch')
     if op == 'codex_prepare':

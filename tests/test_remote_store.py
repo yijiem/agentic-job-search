@@ -1,0 +1,298 @@
+import gzip
+import io
+import json
+import os
+import tempfile
+import unittest
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import patch
+from urllib.error import HTTPError
+
+from jobflow import remote
+from jobflow.remote_store import RemoteStore, read_records
+from jobflow.storage import Store
+
+
+class Reply(io.BytesIO):
+    def __init__(self, value, compressed=False):
+        content = json.dumps(value).encode()
+        super().__init__(gzip.compress(content) if compressed else content)
+        self.headers = {'Content-Encoding': 'gzip'} if compressed else {}
+
+
+class Opener:
+    def __init__(self, reply):
+        self.reply = reply
+        self.requests = []
+
+    def open(self, request, timeout):
+        self.requests.append(request)
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+class MemoryRPC:
+    def __init__(self):
+        self.rows = {}
+        self.calls = []
+        self.token = None
+        self.lease_available = True
+        self.revision = 0
+        self.runs = []
+        self.conflict_after_first_page = False
+
+    def rpc(self, name, params):
+        self.calls.append((name, params))
+        if name == 'jobflow_workspace_lease':
+            action = params['p_action']
+            if action == 'acquire':
+                if not self.lease_available:
+                    return False
+                self.token = params['p_token']
+                return True
+            if action == 'renew':
+                return self.token == params['p_token']
+            if action == 'release':
+                if self.token != params['p_token']:
+                    return False
+                self.token = None
+                return True
+        if name == 'jobflow_record_get':
+            value = self.rows.get((params['p_kind'], params['p_id']))
+            return value['body'] if value else None
+        if name == 'jobflow_records_put':
+            if not self.token or self.token != params['p_token']:
+                raise remote.RemoteBusyError('expired')
+            for row in params['p_rows']:
+                self.rows[row['kind'], row['id']] = dict(row)
+            self.revision += 1
+            return len(params['p_rows'])
+        if name == 'jobflow_records_page':
+            if self.conflict_after_first_page and params['p_after_id']:
+                return {'conflict': True}
+            rows = sorted(self.rows.values(), key=lambda r: (r['kind'], r['created_at'], r['id']))
+            rows = [r for r in rows if (not params['p_kind'] or r['kind'] == params['p_kind'])
+                    and (r['kind'], r['created_at'], r['id']) >
+                    (params['p_after_kind'], params['p_after_created'], params['p_after_id'])]
+            if params['p_mode'] == 'projected':
+                rows = [{**r, 'body': {k: v for k, v in r['body'].items() if k != 'description'}} for r in rows]
+            return {'records': rows[:params['p_limit']], 'revision': self.revision,
+                    'count': sum(r['kind'] == 'jobs' for r in self.rows.values()),
+                    'runs': self.runs, 'conflict': False}
+        if name == 'jobflow_import_verify':
+            return {'records_mismatched': sum(self.rows.get((r['kind'], r['id'])) != r
+                                             for r in params.get('p_records', [])),
+                    'runs_mismatched': 0}
+        if name == 'jobflow_workspace_stats':
+            return {'records': {'jobs': len(self.rows)}, 'runs': 0, 'revision': self.revision}
+        raise AssertionError(name)
+
+
+class RemoteTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        (self.root / 'config').mkdir()
+        self.workspace = str(uuid.uuid4())
+        (self.root / 'config/remote.json').write_text(json.dumps({'workspace_id': self.workspace}))
+        self.env = patch.dict(os.environ, {'JOBFLOW_BACKEND': 'supabase',
+            'SUPABASE_URL': 'https://project.supabase.co', 'SUPABASE_SECRET_KEY': 'sb_secret_test'}, clear=True)
+        self.env.start()
+        self.client = MemoryRPC()
+
+    def tearDown(self):
+        self.env.stop()
+        self.directory.cleanup()
+
+    def row(self, identifier, description='full description'):
+        return {'kind': 'jobs', 'id': identifier,
+                'body': {'id': identifier, 'description': description, 'eligible': True, 'score': 50},
+                'created_at': '2026-01-02T03:04:05+00:00', 'updated_at': '2026-02-03T04:05:06+00:00'}
+
+    def test_secret_transport_is_gzipped_and_never_follows_redirects(self):
+        opener = Opener(Reply({'ok': True}, compressed=True))
+        client = remote.SupabaseClient('https://project.supabase.co', 'sb_secret_test', opener=opener)
+        self.assertEqual({'ok': True}, client.rpc('jobflow_test', {'private': 'data'}))
+        request = opener.requests[0]
+        self.assertEqual('gzip', request.get_header('Accept-encoding'))
+        self.assertEqual('sb_secret_test', request.get_header('Apikey'))
+        self.assertGreater(client.received_bytes, 0)
+        self.assertNotIn('sb_secret_test', request.full_url)
+        with self.assertRaises(remote.RemoteError):
+            remote._NoRedirect().redirect_request(request, None, 302, '', {}, 'https://other.example')
+
+    def test_transport_errors_do_not_echo_key_or_response(self):
+        error = HTTPError('https://project.supabase.co', 403, 'secret failure', {},
+                          io.BytesIO(b'{"message":"sb_secret_test private profile", "code":"42501"}'))
+        client = remote.SupabaseClient('https://project.supabase.co', 'sb_secret_test', opener=Opener(error))
+        with self.assertRaises(remote.RemoteError) as result:
+            client.rpc('jobflow_test', {})
+        self.assertNotIn('sb_secret_test', str(result.exception))
+        self.assertNotIn('private profile', str(result.exception))
+        self.assertEqual('42501', result.exception.code)
+
+    def test_transport_rejects_public_keys_and_untrusted_paths(self):
+        with self.assertRaises(remote.RemoteError):
+            remote.SupabaseClient('http://project.supabase.co', 'sb_secret_test')
+        with self.assertRaises(remote.RemoteError):
+            remote.SupabaseClient('https://project.supabase.co', 'sb_publishable_test')
+        client = remote.SupabaseClient('https://project.supabase.co', 'sb_secret_test')
+        with self.assertRaises(remote.RemoteError):
+            client.request('GET', '//other.example/data')
+        with self.assertRaises(remote.RemoteError):
+            client.request('GET', '/rest/v1/', headers={'Authorization': 'different'})
+        with self.assertRaises(remote.RemoteError):
+            client.storage_download('private', '../other/file')
+
+    def test_marker_is_required_and_canonical(self):
+        self.assertEqual(self.workspace, remote.workspace_id(self.root))
+        (self.root / 'config/remote.json').write_text('{"workspace_id":"../someone"}')
+        with self.assertRaises(remote.RemoteError):
+            remote.workspace_id(self.root)
+
+    def test_marker_symlink_rejected(self):
+        marker = self.root / 'config/remote.json'
+        content = marker.read_text()
+        marker.unlink()
+        target = self.root / 'marker'
+        target.write_text(content)
+        marker.symlink_to(target)
+        with self.assertRaises(remote.RemoteError):
+            remote.workspace_id(self.root)
+
+    def test_store_factory_keeps_local_workspaces_local(self):
+        with patch('jobflow.remote_store.client_from_env', return_value=self.client):
+            self.assertIsInstance(Store(self.root / 'data/jobflow.sqlite3'), RemoteStore)
+        with patch.dict(os.environ, {'JOBFLOW_BACKEND': ''}):
+            store = Store(self.root / 'data/jobflow.sqlite3')
+            self.assertNotIsInstance(store, RemoteStore)
+            store.close()
+
+    def test_lease_nested_and_child_environment_are_isolated(self):
+        before = dict(os.environ)
+        with remote.RemoteLease(self.root, client=self.client) as outer:
+            self.assertEqual(outer.token, remote.token_for(self.root))
+            child = remote.lease_environment(self.root)
+            self.assertEqual(self.workspace, child['JOBFLOW_LEASE_WORKSPACE_ID'])
+            self.assertEqual(before, dict(os.environ))
+            with remote.RemoteLease(self.root, client=self.client) as nested:
+                self.assertEqual(outer.token, nested.token)
+            self.assertEqual(outer.token, self.client.token)
+        self.assertIsNone(self.client.token)
+        with self.assertRaises(remote.RemoteError):
+            remote.token_for(self.root)
+        self.assertEqual(1, sum(n == 'jobflow_workspace_lease' and p['p_action'] == 'release'
+                                for n, p in self.client.calls))
+
+    def test_inherited_token_cannot_authorize_another_workspace(self):
+        with patch.dict(os.environ, {'JOBFLOW_LEASE_WORKSPACE_ID': str(uuid.uuid4()),
+                                     'JOBFLOW_LEASE_TOKEN': 'x' * 43}):
+            with self.assertRaises(remote.RemoteError):
+                remote.token_for(self.root)
+        with patch.dict(os.environ, {'JOBFLOW_LEASE_WORKSPACE_ID': self.workspace,
+                                     'JOBFLOW_LEASE_TOKEN': 'x' * 43}):
+            with self.assertRaises(remote.RemoteBusyError):
+                with remote.RemoteLease(self.root, client=self.client):
+                    pass
+
+    def test_busy_and_lost_leases_fail_closed(self):
+        self.client.lease_available = False
+        with self.assertRaises(remote.RemoteBusyError):
+            with remote.RemoteLease(self.root, client=self.client):
+                self.fail('entered occupied lease')
+        self.client.lease_available = True
+        with remote.RemoteLease(self.root, client=self.client) as lease:
+            lease._lost.set()
+            with self.assertRaises(remote.RemoteBusyError):
+                remote.token_for(self.root)
+
+    def test_nested_lease_observes_parent_renewal_failure(self):
+        with remote.RemoteLease(self.root, client=self.client) as outer:
+            with remote.RemoteLease(self.root, client=self.client):
+                outer._lost.set()
+                with self.assertRaises(remote.RemoteBusyError):
+                    remote.token_for(self.root)
+
+    def test_writes_require_lease_and_use_marker_workspace(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with self.assertRaises(remote.RemoteError):
+            store.put('jobs', 'one', {'id': 'one'})
+        with remote.RemoteLease(self.root, client=self.client):
+            store.put('jobs', 'one', {'id': 'one'})
+        mutation = [p for n, p in self.client.calls if n == 'jobflow_records_put'][0]
+        self.assertEqual(self.workspace, mutation['p_workspace'])
+        self.assertNotIn('workspace_id', mutation['p_rows'][0]['body'])
+
+    def test_batch_preloads_gets_and_saves_bounded_updates(self):
+        self.client.rows = {('jobs', str(i)): self.row(str(i)) for i in range(12)}
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with remote.RemoteLease(self.root, client=self.client):
+            with patch('jobflow.remote_store.BATCH_SIZE', 5):
+                with store.batch(preload=('jobs',)):
+                    for i in range(12):
+                        value = {**store.get('jobs', str(i)), 'score': 70}
+                        store.put('jobs', str(i), value)
+                    self.assertEqual(70, store.get('jobs', '11')['score'])
+        self.assertEqual(0, sum(n == 'jobflow_record_get' for n, _ in self.client.calls))
+        writes = [p for n, p in self.client.calls if n == 'jobflow_records_put']
+        self.assertEqual([5, 5, 2], [len(p['p_rows']) for p in writes])
+
+    def test_batch_saves_completed_work_on_validation_failure(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with remote.RemoteLease(self.root, client=self.client):
+            with self.assertRaisesRegex(ValueError, 'validation'):
+                with store.batch():
+                    store.put('tasks', 'done', {'id': 'done', 'status': 'done'})
+                    raise ValueError('validation')
+        self.assertEqual('done', self.client.rows['tasks', 'done']['body']['status'])
+
+    def test_batch_does_not_flush_after_lease_loss(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with remote.RemoteLease(self.root, client=self.client) as lease:
+            with self.assertRaises(remote.RemoteBusyError):
+                with store.batch():
+                    store.put('tasks', 'done', {'id': 'done'})
+                    lease._lost.set()
+        self.assertNotIn(('tasks', 'done'), self.client.rows)
+
+    def test_group_update_is_one_transaction(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with remote.RemoteLease(self.root, client=self.client):
+            store.put_groups({'applications': [{'id': 'a'}], 'tasks': [{'id': 't'}]})
+        self.assertEqual(1, sum(n == 'jobflow_records_put' for n, _ in self.client.calls))
+
+    def test_import_preserves_timestamps_and_verifies_without_downloading_bodies(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        row = self.row('owner')
+        original = {**row, 'body': json.dumps(row['body'])}
+        with remote.RemoteLease(self.root, client=self.client):
+            store.import_records([original])
+        self.assertEqual(row, self.client.rows['jobs', 'owner'])
+        self.assertEqual({'records_mismatched': 0, 'runs_mismatched': 0}, store.verify_import([original]))
+        self.assertFalse(any(n == 'jobflow_records_page' for n, _ in self.client.calls))
+
+    def test_paginated_projection_keeps_full_description_in_database(self):
+        self.client.rows = {('jobs', str(i)): self.row(str(i)) for i in range(5)}
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with patch('jobflow.remote_store.PAGE_SIZE', 2):
+            projected = store.all_projected_jobs()
+        self.assertEqual(5, len(projected))
+        self.assertTrue(all('description' not in row for row in projected))
+        self.assertTrue(all('description' in row['body'] for row in self.client.rows.values()))
+        self.assertEqual(3, sum(n == 'jobflow_records_page' for n, _ in self.client.calls))
+
+    def test_read_records_refuses_mixed_revisions(self):
+        self.client.rows = {('jobs', str(i)): self.row(str(i)) for i in range(3)}
+        self.client.conflict_after_first_page = True
+        with patch('jobflow.remote_store.client_from_env', return_value=self.client):
+            with patch('jobflow.remote_store.PAGE_SIZE', 2):
+                with self.assertRaises(remote.RemoteError) as result:
+                    read_records(self.root)
+        self.assertEqual(409, result.exception.status)
+
+
+if __name__ == '__main__':
+    unittest.main()

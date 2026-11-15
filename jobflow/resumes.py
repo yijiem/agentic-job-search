@@ -28,6 +28,14 @@ PROFILE_ID = 'default'
 
 def _records(root, kinds):
     result = {kind: [] for kind in kinds}
+    from .remote_files import is_remote_root
+    if is_remote_root(root):
+        from .storage import Store
+        store = Store(Path(root) / 'data/jobflow.sqlite3')
+        try:
+            return {kind: store.all(kind) for kind in kinds}
+        finally:
+            store.close()
     path = Path(root) / 'data/jobflow.sqlite3'
     if not path.exists():
         return result
@@ -43,6 +51,8 @@ def _records(root, kinds):
 
 def _profile(root):
     path = Path(root) / 'config/profile.json'
+    from .remote_files import ensure_path
+    path = ensure_path(path)
     if not path.exists() or path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
         return {}
     value = json.loads(path.read_text(encoding='utf-8'))
@@ -207,6 +217,8 @@ def sync_existing(root, store, profile):
             full = _read_json(root / 'inputs/resumes' / (metadata['id'] + '.json'))
             name = full['filename']
             path = root / 'inputs/resumes' / (full['id'] + Path(name).suffix.lower())
+            from .remote_files import ensure_path
+            path = ensure_path(path)
             if path.is_symlink() or not path.is_file() or path.stat().st_size > 5 * 1024 * 1024:
                 raise ValueError('The original upload is unavailable.')
             content = path.read_bytes()
@@ -232,6 +244,8 @@ def sync_existing(root, store, profile):
                 chain.append(chain[-1] / part)
             if any(item.is_symlink() for item in chain) or '..' in relative.parts:
                 raise ValueError('Configured source must be a regular file inside workspace inputs.')
+            from .remote_files import ensure_path
+            path = ensure_path(path)
             if not path.is_file() or path.stat().st_size > 5 * 1024 * 1024:
                 raise ValueError('Configured resume is unavailable or too large.')
             row = import_resume(root, store, path.name, path.read_bytes(), {'kind': 'configured_source'})

@@ -66,7 +66,11 @@ class BatchHTTPTests(unittest.TestCase):
         payload = {'action': 'batch', 'op': 'upload_resume', 'filename': 'fixture.txt',
                    'content_base64': base64.b64encode(content).decode('ascii')}
         self.assertGreater(len(json.dumps(payload)), MAX_REQUEST_BYTES)
-        self.assertEqual(self.request('POST', '/api/action', payload)[0], 403)
+        # CSRF is rejected before reading a request body. A bounded negative
+        # request avoids a platform-dependent TCP reset while the client is
+        # still sending a large unauthorized upload.
+        unauthorized = {**payload, 'content_base64': ''}
+        self.assertEqual(self.request('POST', '/api/action', unauthorized)[0], 403)
         status, uploaded = self.request('POST', '/api/action', payload, token)
         self.assertEqual(status, 200, uploaded)
         resume_id = uploaded['resume']['id']

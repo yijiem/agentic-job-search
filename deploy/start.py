@@ -16,9 +16,10 @@ if str(REPOSITORY) not in sys.path:
 def configuration(environ=None):
     """Resolve non-secret runtime configuration; refuse unsafe defaults."""
     environ = os.environ if environ is None else environ
-    root = Path(environ.get('JOBFLOW_CLOUD_ROOT', '/var/data/jobflow'))
+    remote = environ.get('JOBFLOW_BACKEND', '').casefold() == 'supabase'
+    root = Path(environ.get('JOBFLOW_CLOUD_ROOT', '/tmp/jobflow' if remote else '/var/data/jobflow'))
     if not root.is_absolute():
-        raise ValueError('JOBFLOW_CLOUD_ROOT must be an absolute persistent-storage path.')
+        raise ValueError('JOBFLOW_CLOUD_ROOT must be an absolute workspace path.')
     origin = environ.get('JOBFLOW_PUBLIC_ORIGIN') or environ.get('RENDER_EXTERNAL_URL', '')
     from jobflow.cloud import validate_origin
     origin = validate_origin(origin, '0.0.0.0')
@@ -39,12 +40,16 @@ def main():
     # Validate provider configuration before creating any account storage or
     # listening on the network. There is no production authentication bypass.
     SupabaseEmailAuth()
-    serve(root, host='0.0.0.0', port=port, origin=origin, worker=True)
+    from jobflow.remote import enabled, client_from_env
+    if enabled():
+        client_from_env()
+    serve(root, host='0.0.0.0', port=port, origin=origin, worker=not enabled())
 
 
 if __name__ == '__main__':
+    from jobflow.remote import RemoteError
     try:
         main()
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, RemoteError) as error:
         print('Jobflow startup failed: ' + str(error), file=sys.stderr)
         raise SystemExit(1)
