@@ -88,6 +88,32 @@ Mark a custom field supported only after verifying that the browser tools can
 operate its actual control. The server binds the observed schema and plan;
 never reuse the retired extension's unsupported schema as a completed review.
 
+For a visible checkbox whose ordinary meaning indicates that another required
+field becomes inapplicable (for example, **Current role** and employment end
+dates), a review may include a **prospective**, unverified condition. Keep the
+dependent field's observed `required: true`; do not fill the page in inspection
+mode or invent a value to satisfy it. Add `required_unless` to each dependent
+field, referencing the exact inspected, supported checkbox and an explicit
+boolean planned answer:
+
+```json
+{
+  "key": "end-date-year-0",
+  "label": "End date year",
+  "type": "text",
+  "required": true,
+  "supported": true,
+  "required_unless": {"key": "current-role-0_1", "equals": true}
+}
+```
+
+This records the conditional plan, not proof of the employer's behavior. Missing
+or non-boolean controller answers never waive a requirement. When the planned
+condition does not match, provide the required dependent answer. Unknown,
+unsupported, self-referencing, and non-checkbox controllers are rejected, and
+unsupported dependent controls still block readiness. The condition remains in
+the reviewed schema and immutable authorization.
+
 Use the selected resume and recorded professional evidence for proposed factual
 answers. Do not invent achievements or choose eligibility, sponsorship, salary,
 referral, demographic, or consent answers. Gather missing questions across roles
@@ -109,6 +135,52 @@ If a role needs a fresh inspection after a resolved blocker or expired pre-submi
 attempt, use `codex_answers` with `answers: {}` when no answers need changing.
 `codex_claim` does not automatically retry a role marked `needs_input`.
 
+### Verified employer links to an external ATS
+
+If the employer's actual Apply link opens a different application host, record
+the real destination; never report the listing URL as the form's observed URL.
+The CLI currently supports only Coinbase's exact role-preserving link from
+`https://www.coinbase.com/careers/positions/ID?gh_jid=ID` to
+`https://job-boards.greenhouse.io/embed/job_app?token=ID&for=coinbase&gh_jid=ID`.
+Other redirects remain a `needs_input` blocker.
+
+After observing the link and verifying the employer, title, and matching numeric
+role ID on both pages, finish any active inspection with a `needs_input` report.
+Then use the normal JSON request CLI with this operation (replace placeholders
+with observed values and the latest batch revision):
+
+```json
+{
+  "op": "codex_bind_destination",
+  "workspace_id": "WORKSPACE_ID",
+  "run_id": "RUN_ID",
+  "worker_id": "WORKER_ID",
+  "batch_id": "BATCH_ID",
+  "job_id": "JOB_ID",
+  "revision": 1,
+  "listing_url": "https://www.coinbase.com/careers/positions/ID?gh_jid=ID",
+  "observed_href": "https://job-boards.greenhouse.io/embed/job_app?token=ID&for=coinbase&gh_jid=ID",
+  "destination_url": "https://job-boards.greenhouse.io/embed/job_app?token=ID&for=coinbase&gh_jid=ID",
+  "observed_company": "Coinbase",
+  "observed_title": "EXACT_SELECTED_ROLE_TITLE",
+  "observed_role_id": "ID"
+}
+```
+
+This retains the listing `url`, records a separate `application_url` and dated
+link evidence, and invalidates previous review and authorization. Claim a fresh
+inspection and review the actual destination before authorizing. Use the task's
+`application_url` for browser work. Form observations must match that bound
+destination, including its role identifiers. Automatic confirmation evidence
+may use the same URL or Coinbase's exact Greenhouse receipt route
+`https://job-boards.greenhouse.io/embed/job_app/confirmation?for=coinbase&token=ID`,
+with the bound role ID and no additional query parameters. This receipt-only
+exception does not authorize a different form, role, board, or host. If the
+confirmation moves elsewhere, retain the actual evidence and report `uncertain`
+rather than inventing a matching URL.
+Binding cannot change paused, busy, completed, or uncertain applications and
+does not permit retrying a submission or bypassing consent or duplicate checks.
+
 ### Authorize, fill, and click once
 
 When the exact materials and answers are covered by the user's request and
@@ -123,11 +195,24 @@ still matches. Upload only the selected, integrity-checked resume path. Fill
 the form using ordinary browser controls, including custom dropdowns; verify
 the retained values and every required field against the approved answers.
 If new questions appear, report `needs_input` and reinspect instead of guessing.
+For each prospective `required_unless` condition that matches the authorized
+plan, first set the authorized checkbox answer, then inspect the resulting live
+form. Verify that the dependent field is actually absent, disabled, or no longer
+required. A label or the planned answer alone is insufficient at this stage.
+If the requirement remains or its behavior is unclear, report `needs_input`
+before entering the submitting checkpoint; do not fabricate an end date or
+confirm a waiver that was not observed.
 
 Immediately before the final submit click:
 
 1. Record `codex_report` with `status: "submitting"` and the task's
-   `form_signature`. If that request fails or its outcome is unknown, do not click.
+   `form_signature`. For every required field waived by the authorized conditional
+   plan, include `verified_conditionals` mapping its exact key to `true`, after
+   the live verification above (for example,
+   `{"end-date-month-0": true, "end-date-year-0": true}`). The mapping must contain
+   all and only those dependent keys; missing, extra, or non-true entries are
+   rejected. The checkpoint retains these attestations with the submitted
+   materials. If that request fails or its outcome is unknown, do not click.
 2. Call `codex_check` with `phase: "before_click"`. Click only if its response
    explicitly returns `can_click: true`. This consumes a one-time grant.
 3. Click the employer's final submission control exactly once. Do not repeat

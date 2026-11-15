@@ -83,6 +83,31 @@ class CodexBatchTests(unittest.TestCase):
         batch['items'][0]['lease_until'] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         self.store.put(BATCH_KIND, batch['id'], batch)
 
+    def coinbase(self):
+        self.listing_url = 'https://www.coinbase.com/careers/positions/8304034?gh_jid=8304034'
+        self.destination_url = 'https://job-boards.greenhouse.io/embed/job_app?token=8304034&for=coinbase&gh_jid=8304034'
+        batch = self.store.get(BATCH_KIND, self.batch['id'])
+        job = self.store.get('jobs', 'job-1')
+        job.update(company='Coinbase', title='Senior Software Engineer', url=self.listing_url)
+        self.store.put('jobs', 'job-1', job)
+        batch['items'][0].update({key: job[key] for key in ('company', 'title', 'url')})
+        self.store.put(BATCH_KIND, batch['id'], batch)
+        self.prepare()
+        self.context()
+
+    def bind_destination(self, **changes):
+        return self.codex('codex_bind_destination', **{
+            'job_id': 'job-1', 'revision': self.current()['revision'], 'listing_url': self.listing_url,
+            'observed_href': self.destination_url, 'destination_url': self.destination_url,
+            'observed_company': 'Coinbase', 'observed_title': 'Senior Software Engineer',
+            'observed_role_id': '8304034', **changes})
+
+    def inspect_destination(self, task=None):
+        task = task or self.claim()
+        return self.report(task, 'inspected', observed_url=self.destination_url,
+            fields=[{'key': 'name', 'label': 'Name', 'type': 'text', 'required': True}],
+            planned_answers={'name': 'Ada Example'})['batch']
+
     def test_prepare_reserves_without_authorizing_and_is_idempotent(self):
         revision = self.current()['revision']
         result = self.prepare()
@@ -338,6 +363,269 @@ class CodexBatchTests(unittest.TestCase):
         self.assertNotEqual(second['run']['id'], first_run)
         self.assertEqual(second['run']['job_ids'], ['job-3'])
         self.assertEqual(second['batch']['codex_history'][-1]['id'], first_run)
+
+    def conditional_fields(self):
+        return [
+            {'key': 'current_role', 'label': 'Current role', 'type': 'checkbox', 'required': False},
+            {'key': 'end_month', 'label': 'End month', 'type': 'select', 'required': True,
+             'options': ['January', 'February'], 'required_unless': {'key': 'current_role', 'equals': True}},
+            {'key': 'end_year', 'label': 'End year', 'type': 'text', 'required': True,
+             'required_unless': {'key': 'current_role', 'equals': True}}]
+
+    def test_conditional_plan_requires_exact_observed_verification_before_click_checkpoint(self):
+        self.prepare()
+        self.context()
+        task = self.claim()
+        ready = self.report(task, 'inspected', observed_url=task['url'], fields=self.conditional_fields(),
+            planned_answers={'current_role': True})['batch']
+        item = ready['items'][0]
+        self.assertEqual(item['status'], 'ready')
+        self.assertTrue(item['fields'][1]['required'])
+        self.assertEqual(item['fields'][1]['required_unless'], {'key': 'current_role', 'equals': True})
+        self.assertEqual(item['codex_review_history'][-1]['fields'], item['fields'])
+        self.codex('codex_authorize', revision=ready['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        before = self.current()
+        invalid = [None, {}, {'end_month': True}, {'end_month': True, 'end_year': False},
+                   {'end_month': True, 'end_year': 1}, {'end_month': True, 'end_year': True, 'extra': True}]
+        for verified in invalid:
+            with self.subTest(verified=verified), self.assertRaisesRegex(ValueError, 'conditional requirement'):
+                self.report(task, 'submitting', form_signature=task['form_signature'], verified_conditionals=verified)
+            self.assertEqual(self.current(), before)
+        with self.assertRaisesRegex(ValueError, 'checkpoint'):
+            self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'], phase='before_click')
+        verified = {'end_month': True, 'end_year': True}
+        self.report(task, 'submitting', form_signature=task['form_signature'], verified_conditionals=verified)
+        raw = self.store.get(BATCH_KIND, self.batch['id'])['items'][0]
+        self.assertEqual(raw['submission_materials']['verified_conditionals'], verified)
+        self.assertIn('conditionals_verified_at', raw['submission_materials'])
+        self.assertTrue(raw['submission_materials']['fields'][1]['required'])
+        self.assertTrue(self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'], phase='before_click')['can_click'])
+        result = self.report(task, 'submitted', evidence={'url': task['url'], 'text': 'Application received.'})
+        self.assertEqual(result['batch']['items'][0]['submitted_materials']['verified_conditionals'], verified)
+
+    def test_false_or_unanswered_conditional_controller_does_not_waive_dates(self):
+        self.prepare()
+        self.context()
+        for answer in (False, None, 'true'):
+            with self.subTest(answer=answer):
+                task = self.claim()
+                planned = {} if answer is None else {'current_role': answer}
+                result = self.report(task, 'inspected', observed_url=task['url'], fields=self.conditional_fields(),
+                    planned_answers=planned)['batch']
+                item = result['items'][0]
+                self.assertEqual(item['status'], 'needs_input')
+                self.assertIn('End month', item['missing_fields'])
+                self.assertIn('End year', item['missing_fields'])
+                with self.assertRaisesRegex(ValueError, 'ready form'):
+                    self.codex('codex_authorize', revision=result['revision'], job_ids=['job-1'], confirmed=True)
+                self.codex('codex_answers', job_id='job-1', answers={})
+        task = self.claim()
+        ready = self.report(task, 'inspected', observed_url=task['url'], fields=self.conditional_fields(),
+            planned_answers={'current_role': False, 'end_month': 'January', 'end_year': '2020'})['batch']
+        self.codex('codex_authorize', revision=ready['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        self.report(task, 'submitting', form_signature=task['form_signature'])
+
+    def test_conditional_schema_rejects_unreliable_controllers_and_malformed_rules(self):
+        self.prepare()
+        self.context()
+        task = self.claim()
+        invalid = [None, {}, {'key': 'current_role'}, {'key': 'current_role', 'equals': 'true'},
+                   {'key': 'current_role', 'equals': 1}, {'key': 'current_role', 'equals': True, 'extra': True},
+                   {'key': 'missing', 'equals': True}, {'key': 'end_month', 'equals': True}]
+        for condition in invalid:
+            fields = self.conditional_fields()
+            fields[1]['required_unless'] = condition
+            with self.subTest(condition=condition), self.assertRaisesRegex(ValueError, 'Conditional requirement'):
+                self.report(task, 'inspected', observed_url=task['url'], fields=fields,
+                    planned_answers={'current_role': True})
+        for change in ({'type': 'text'}, {'supported': False}):
+            fields = self.conditional_fields()
+            fields[0].update(change)
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'known supported checkbox'):
+                self.report(task, 'inspected', observed_url=task['url'], fields=fields,
+                    planned_answers={'current_role': True})
+        fields = self.conditional_fields()
+        fields[1]['required'] = False
+        with self.assertRaisesRegex(ValueError, 'required field'):
+            self.report(task, 'inspected', observed_url=task['url'], fields=fields,
+                planned_answers={'current_role': True})
+
+    def test_waiver_does_not_hide_unsupported_controls_or_invalid_supplied_values(self):
+        self.prepare()
+        self.context()
+        task = self.claim()
+        fields = self.conditional_fields()
+        fields[2]['supported'] = False
+        result = self.report(task, 'inspected', observed_url=task['url'], fields=fields,
+            planned_answers={'current_role': True, 'end_month': 'Invented month'})['batch']['items'][0]
+        self.assertEqual(result['status'], 'needs_input')
+        self.assertIn('End year (complete in browser)', result['missing_fields'])
+        self.assertIn('End month (choose a listed option)', result['missing_fields'])
+
+    def test_bound_destination_preserves_listing_and_requires_exact_form_and_receipt(self):
+        self.coinbase()
+        bound = self.bind_destination()['batch']['items'][0]
+        self.assertEqual(bound['url'], self.listing_url)
+        self.assertEqual(bound['application_url'], self.destination_url)
+        self.assertEqual(bound['status'], 'pending')
+        self.assertEqual(bound['destination_binding']['observed_href'], self.destination_url)
+        task = self.claim()
+        self.assertEqual(task['url'], self.listing_url)
+        self.assertEqual(task['application_url'], self.destination_url)
+        for wrong in (self.listing_url, self.destination_url.replace('8304034', '999'),
+                      self.destination_url.replace('coinbase&', 'different&'),
+                      self.destination_url.replace('/embed/job_app', '/unrelated'),
+                      'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=coinbase&token=8304034'):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(ValueError, 'different application'):
+                self.report(task, 'inspected', observed_url=wrong,
+                    fields=[{'key': 'name', 'type': 'text'}], planned_answers={'name': 'Ada'})
+        ready = self.inspect_destination(task)
+        self.codex('codex_authorize', revision=ready['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        self.assertTrue(self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'])['can_fill'])
+        self.report(task, 'submitting', form_signature=task['form_signature'])
+        self.assertTrue(self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'], phase='before_click')['can_click'])
+        for wrong in (self.listing_url, self.destination_url.replace('8304034', '999'),
+                      'https://job-boards.greenhouse.io/other-role'):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(ValueError, 'different application'):
+                self.report(task, 'submitted', evidence={'url': wrong, 'text': 'Received.'})
+        result = self.report(task, 'submitted', evidence={'url': self.destination_url, 'text': 'Application received.'})
+        self.assertEqual(result['batch']['codex_run']['status'], 'complete')
+        receipt = self.store.get('applications', 'job-1')['browser_submissions'][-1]
+        self.assertFalse(receipt['manual'])
+        self.assertEqual(receipt['evidence']['url'], self.destination_url)
+        self.assertEqual(result['batch']['items'][0]['submitted_materials']['application_url'], self.destination_url)
+
+    def test_bound_coinbase_receipt_accepts_only_exact_matching_confirmation_route(self):
+        self.coinbase()
+        self.bind_destination()
+        ready = self.inspect_destination()
+        self.codex('codex_authorize', revision=ready['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        self.report(task, 'submitting', form_signature=task['form_signature'])
+        self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'], phase='before_click')
+        confirmation = 'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=coinbase&token=8304034'
+        invalid = [confirmation.replace('8304034', '999'), confirmation.replace('coinbase&', 'different&'),
+                   confirmation + '&gh_jid=8304034', confirmation + '&token=8304034',
+                   confirmation.replace('for=coinbase&', ''), confirmation.replace('&token=8304034', ''),
+                   confirmation.replace('https:', 'http:'),
+                   confirmation.replace('job-boards.greenhouse.io', 'evil.example.com'),
+                   confirmation.replace('/confirmation?', '/confirmation/other?'),
+                   confirmation.replace('/confirmation?', '/confirmation/?'), confirmation + '#other']
+        before = self.current()
+        for wrong in invalid:
+            with self.subTest(wrong=wrong), self.assertRaises(ValueError):
+                self.report(task, 'submitted', evidence={'url': wrong, 'text': 'Application received.'})
+            self.assertEqual(self.current(), before)
+        self.report(task, 'uncertain', message='Awaiting verified employer receipt; no repeat submission.')
+        result = self.report(task, 'submitted', evidence={'url': confirmation,
+            'text': 'Thank you for applying. Your application has been received.'})
+        item = result['batch']['items'][0]
+        self.assertEqual(item['status'], 'submitted')
+        self.assertEqual(item['evidence']['url'], confirmation)
+        self.assertEqual(item['application_url'], self.destination_url)
+        self.assertEqual(item['submitted_materials']['application_url'], self.destination_url)
+        self.assertEqual(len(self.store.get('applications', 'job-1')['browser_submissions']), 1)
+
+    def test_binding_rejects_changed_role_company_and_unsafe_destinations(self):
+        self.coinbase()
+        invalid = [
+            {'observed_company': 'Different'}, {'observed_title': 'Different'}, {'observed_role_id': '999'},
+            {'listing_url': self.listing_url.replace('8304034', '999')},
+            {'observed_href': self.destination_url.replace('8304034', '999')},
+            {'destination_url': self.destination_url.replace('token=8304034', 'token=999')},
+            {'destination_url': self.destination_url.replace('coinbase&', 'different&')},
+            {'destination_url': self.destination_url + '&redirect=https://other.example.com'},
+            {'destination_url': self.destination_url + '&token=8304034'},
+            {'destination_url': self.destination_url.replace('https:', 'http:')},
+            {'destination_url': 'https://127.0.0.1/embed/job_app'},
+            {'destination_url': self.destination_url.replace('job-boards.greenhouse.io', 'evil.example.com')},
+            {'destination_url': self.destination_url + '#other'},
+            {'observed_href': self.destination_url + '#other'},
+        ]
+        before = self.current()
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                self.bind_destination(**payload)
+            self.assertEqual(self.current(), before)
+
+    def test_binding_requires_current_owner_revision_and_active_unsubmitted_state(self):
+        self.coinbase()
+        for payload in ({'worker_id': 'foreign'}, {'workspace_id': 'wrong'}, {'revision': -1}, {'job_id': 'job-2'}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                self.bind_destination(**payload)
+        task = self.claim()
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_destination()
+        self.expire()
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_destination()
+        self.context()  # Explicit recovery, never revival of the expired attempt.
+        paused = self.action('pause', batch_id=self.batch['id'], revision=self.current()['revision'])['batch']
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_destination()
+        self.action('resume', batch_id=self.batch['id'], revision=paused['revision'])
+        self.store.put('applications', 'job-1', {'id': 'job-1', 'job_id': 'job-1', 'stage': 'applied'})
+        with self.assertRaisesRegex(ValueError, 'listing or application state changed'):
+            self.bind_destination()
+
+    def test_binding_invalidates_review_authorization_and_binds_snapshot(self):
+        self.coinbase()
+        reviewed = self.inspect()['batch']
+        self.codex('codex_authorize', revision=reviewed['revision'], job_ids=['job-1'], confirmed=True)
+        rebound = self.bind_destination()['batch']['items'][0]
+        self.assertEqual(rebound['status'], 'pending')
+        self.assertNotIn('authorization', rebound)
+        self.assertNotIn('form_signature', rebound)
+        self.assertEqual(len(rebound['codex_review_history']), 1)
+        ready = self.inspect_destination()
+        self.codex('codex_authorize', revision=ready['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        raw = self.store.get(BATCH_KIND, self.batch['id'])
+        raw['items'][0]['authorization']['application_url'] = self.listing_url
+        self.store.put(BATCH_KIND, raw['id'], raw)
+        with self.assertRaisesRegex(ValueError, 'authorized application destination changed'):
+            self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'])
+        raw['items'][0]['authorization']['application_url'] = self.destination_url
+        raw['items'][0]['application_url'] = self.listing_url
+        self.store.put(BATCH_KIND, raw['id'], raw)
+        with self.assertRaisesRegex(ValueError, 'reserved application materials changed'):
+            self.context()
+
+    def test_binding_cannot_change_after_click_or_uncertain_or_submitted(self):
+        self.coinbase()
+        self.bind_destination()
+        ready = self.inspect_destination()
+        self.codex('codex_authorize', revision=ready['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        self.report(task, 'submitting', form_signature=task['form_signature'])
+        self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'], phase='before_click')
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_destination()
+        self.report(task, 'uncertain', message='Outcome unclear; no retry.')
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_destination()
+        self.report(task, 'submitted', evidence={'url': self.destination_url, 'text': 'Application received.'})
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_destination()
+
+    def test_binding_rejects_listing_identity_change_and_unlisted_mapping(self):
+        self.coinbase()
+        job = self.store.get('jobs', 'job-1')
+        job['title'] = 'Different role'
+        self.store.put('jobs', 'job-1', job)
+        with self.assertRaisesRegex(ValueError, 'listing or application state changed'):
+            self.bind_destination()
+        job['title'] = 'Senior Software Engineer'
+        job['company'] = 'Different employer'
+        self.store.put('jobs', 'job-1', job)
+        raw = self.store.get(BATCH_KIND, self.batch['id'])
+        raw['items'][0]['company'] = job['company']
+        self.store.put(BATCH_KIND, raw['id'], raw)
+        with self.assertRaisesRegex(ValueError, 'not a supported exact role mapping'):
+            self.bind_destination(observed_company='Different employer')
 
 
 if __name__ == '__main__':

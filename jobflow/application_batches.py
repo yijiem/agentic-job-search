@@ -111,6 +111,22 @@ def _fields(value):
                        'type': _text(field.get('type', 'text'), 'Question type', 40, True),
                        'required': field.get('required', False), 'supported': field.get('supported', True),
                        'options': [_text(v, 'Question option', 1000) for v in options]})
+        if 'required_unless' in field:
+            condition = field['required_unless']
+            if (not isinstance(condition, dict) or set(condition) != {'key', 'equals'}
+                    or not isinstance(condition['equals'], bool) or not result[-1]['required']):
+                raise ValueError('Conditional requirements need a required field and a checkbox key/boolean condition.')
+            result[-1]['required_unless'] = {
+                'key': _text(condition['key'], 'Conditional checkbox key', 500, True),
+                'equals': condition['equals']}
+    by_key = {field['key']: field for field in result}
+    for field in result:
+        condition = field.get('required_unless')
+        if condition:
+            controller = by_key.get(condition['key'])
+            if (not controller or controller['key'] == field['key'] or
+                    controller['type'] != 'checkbox' or not controller['supported']):
+                raise ValueError('Conditional requirements must reference a different known supported checkbox.')
     return result
 
 
@@ -144,10 +160,20 @@ def _missing(fields, answers, resume):
     return missing
 
 
+def _codex_waived_requirements(fields, answers):
+    """Return prospective waivers; they still need observed pre-submit verification."""
+    return {field['key'] for field in fields if field['required'] and field.get('required_unless')
+            and isinstance(answers.get(field['required_unless']['key']), bool)
+            and answers[field['required_unless']['key']] is field['required_unless']['equals']}
+
+
 def _codex_missing(fields, answers, resume):
     """Validate an independently observed Codex form, including multiselects."""
     missing = []
+    waived = _codex_waived_requirements(fields, answers)
     for field in fields:
+        if field['key'] in waived:
+            field = {**field, 'required': False}
         if field['type'] != 'multiselect':
             missing.extend(_missing([field], answers, resume))
             continue
@@ -710,7 +736,8 @@ def _authorize(store, root, payload, codex=False):
                                  'form_signature': item['form_signature'], 'fields': copy.deepcopy(item['fields']),
                                  'planned_answers': copy.deepcopy(item['planned_answers'])}
         if codex:
-            item['authorization'].update(executor='codex', run_id=item['codex_run_id'])
+            item['authorization'].update(executor='codex', run_id=item['codex_run_id'],
+                                         application_url=item.get('application_url', item['url']))
         item.update(status='queued', message='Authorized for Codex. Waiting to fill the reviewed application.' if codex else 'Authorized. Waiting for the browser worker.')
         _event(batch, 'authorized', item)
     return _save(store, batch)
@@ -817,8 +844,11 @@ def _evidence(value, item, manual=False):
     if not isinstance(value, dict):
         raise ValueError('Record the employer confirmation URL and visible confirmation text.')
     url = _url(value.get('url'))
-    if not manual and urlsplit(url).hostname != urlsplit(item['url']).hostname:
-        raise ValueError('Confirmation evidence must come from the reviewed application host.')
+    if not manual:
+        if item.get('application_url'):
+            _codex_confirmation_url(url, item)
+        elif urlsplit(url).hostname != urlsplit(item['url']).hostname:
+            raise ValueError('Confirmation evidence must come from the reviewed application host.')
     return {'url': url, 'text': _text(value.get('text'), 'Confirmation evidence', 4000, True), 'observed_at': utcnow()}
 
 
@@ -877,7 +907,16 @@ def _report(root, store, payload, codex=False):
         authorization = item.get('authorization', {})
         if payload.get('form_signature') != authorization.get('form_signature'):
             raise ValueError('The employer form changed. Inspect and review it again.')
+        if codex:
+            waived = _codex_waived_requirements(authorization['fields'], authorization['planned_answers'])
+            verified = payload.get('verified_conditionals', {})
+            if (not isinstance(verified, dict) or set(verified) != waived or
+                    any(value is not True for value in verified.values())):
+                raise ValueError('Verify every waived conditional requirement in the actual form before submitting.')
         item['submission_materials'] = copy.deepcopy(authorization)
+        if codex and waived:
+            item['submission_materials'].update(verified_conditionals=copy.deepcopy(verified),
+                                                 conditionals_verified_at=utcnow())
         item.update(status='submitting', message='Submission started; waiting for employer confirmation.')
         _event(batch, 'submission_started', item)
         return _save(store, batch)
@@ -897,6 +936,7 @@ def _report(root, store, payload, codex=False):
         if codex:
             item.setdefault('codex_review_history', []).append({'at': utcnow(), 'run_id': item['codex_run_id'],
                 'observed_url': payload['observed_url'], 'fields': copy.deepcopy(fields),
+                'application_url': item.get('application_url', item['url']),
                 'planned_answers': copy.deepcopy(planned), 'form_signature': signature})
             item['form_executor'] = 'codex'
         item.update(fields=fields, form_signature=signature, planned_answers=planned, missing_fields=missing,
@@ -953,7 +993,7 @@ def _reconcile(store, payload):
     # The user may have completed a legitimate employer-to-ATS redirect that
     # the automatic worker deliberately refused to follow. Preserve that
     # explicit observation with manual provenance; automatic receipts remain
-    # bound to the original application host.
+    # bound to the reviewed application destination.
     evidence = _evidence(payload.get('evidence'), item, manual=True)
     if payload.get('outcome') == 'submitted':
         return _record_submission(store, batch, item, evidence, manual=True)
@@ -1001,6 +1041,9 @@ def _codex_prepare(root, store, payload):
         materials[job_id] = {'url': item['url'], 'resume_id': resume['id'], 'resume_sha256': resume['sha256'],
             'resume': copy.deepcopy(resume),
             'applicant': copy.deepcopy(batch['applicant']), 'answers': {**batch['answers'], **item['answers']}}
+        if item.get('application_url'):
+            materials[job_id].update(application_url=item['application_url'],
+                                    destination_binding=copy.deepcopy(item['destination_binding']))
     run = {'id': 'codex-' + secrets.token_hex(12), 'status': 'awaiting_start', 'created_at': utcnow(),
            'job_ids': ids, 'materials': materials}
     if existing:
@@ -1093,7 +1136,10 @@ def _codex_materials(root, store, batch, run, item):
     saved = run['materials'].get(item['job_id'])
     if not saved or item.get('codex_run_id') != run['id']:
         raise ValueError('This role is outside the reserved Codex run.')
-    if saved['resume_id'] != item['resume_id'] or saved['applicant'] != batch['applicant'] or saved['url'] != item['url'] or saved['answers'] != {**batch['answers'], **item['answers']}:
+    if (saved['resume_id'] != item['resume_id'] or saved['applicant'] != batch['applicant'] or
+            saved['url'] != item['url'] or saved['answers'] != {**batch['answers'], **item['answers']} or
+            saved.get('application_url', saved['url']) != item.get('application_url', item['url']) or
+            saved.get('destination_binding') != item.get('destination_binding')):
         raise ValueError('The reserved application materials changed. Stop and review the run.')
     resume = _resume_record(store, saved['resume_id'])
     if resume['sha256'] != saved['resume_sha256']:
@@ -1110,21 +1156,88 @@ def _codex_task(root, store, batch, run, item):
     material = item.get('authorization') or run['materials'][item['job_id']]
     return {'batch_id': batch['id'], 'run_id': run['id'], 'job_id': item['job_id'], 'status': item['status'],
         'mode': item.get('attempt_mode'), 'attempt_id': item.get('attempt_id'), 'lease_until': item.get('lease_until'),
-        'url': item['url'], 'company': item['company'], 'title': item['title'], 'resume': resume, 'resume_path': path,
+        'url': item['url'], 'application_url': item.get('application_url', item['url']),
+        'destination_binding': copy.deepcopy(item.get('destination_binding')),
+        'company': item['company'], 'title': item['title'], 'resume': resume, 'resume_path': path,
         'applicant': copy.deepcopy(material['applicant']), 'answers': copy.deepcopy(material['answers']),
         'fields': copy.deepcopy(item.get('fields', [])), 'planned_answers': copy.deepcopy(item.get('planned_answers', {})),
         'form_signature': item.get('form_signature', ''), 'missing_fields': copy.deepcopy(item.get('missing_fields', [])),
         'click_granted': bool(item.get('codex_click_granted_at'))}
 
 
-def _codex_observation_url(value, expected):
+def _codex_observation_url(value, expected, exact=False):
     current, original = urlsplit(_url(value)), urlsplit(expected)
     def base(path):
         return re.sub(r'/(?:apply|application)/?$', '', path).rstrip('/')
-    if current.netloc != original.netloc or base(current.path) != base(original.path) or parse_qs(
+    if current.netloc != original.netloc or (current.path != original.path if exact else base(current.path) != base(original.path)) or parse_qs(
             current.query, keep_blank_values=True) != parse_qs(original.query, keep_blank_values=True):
         raise ValueError('The observed form is for a different application. Verify the selected employer role.')
     return value
+
+
+def _codex_confirmation_url(value, item):
+    """Recognize the bound role's Greenhouse receipt without relaxing form URLs."""
+    current, target = urlsplit(_url(value)), urlsplit(item['application_url'])
+    binding = item.get('destination_binding') or {}
+    role_id = binding.get('observed_role_id', '')
+    if (isinstance(role_id, str) and re.fullmatch(r'[0-9]+', role_id) and
+            binding.get('observed_company') == 'Coinbase' and
+            binding.get('destination_url') == item['application_url'] and
+            target.scheme == 'https' and target.netloc == 'job-boards.greenhouse.io' and
+            target.path == '/embed/job_app' and
+            parse_qs(target.query, keep_blank_values=True) == {'token': [role_id], 'for': ['coinbase'], 'gh_jid': [role_id]} and
+            current.netloc == target.netloc and current.path == '/embed/job_app/confirmation' and
+            not current.fragment and
+            parse_qs(current.query, keep_blank_values=True) == {'for': ['coinbase'], 'token': [role_id]}):
+        return value
+    return _codex_observation_url(value, item['application_url'], exact=True)
+
+
+def _codex_bind_destination(root, store, batch, run, payload):
+    """Bind one browser-observed, role-preserving employer-to-ATS link."""
+    _batch(store, {**payload, 'batch_id': batch['id']}, revision=True)
+    item = _item(batch, payload.get('job_id'))
+    if item.get('codex_run_id') != run['id'] or item['job_id'] not in run['job_ids']:
+        raise ValueError('Choose a role reserved in this Codex run.')
+    if (batch['status'] in ('paused', 'cancelled', 'complete') or
+            item['status'] not in ('pending', 'needs_input', 'failed', 'ready', 'queued') or
+            item.get('codex_click_granted_at') or item.get('submission_materials')):
+        raise ValueError('Resolve the current application step before binding its destination; never retry an uncertain submission.')
+    _codex_materials(root, store, batch, run, item)
+    job = store.get('jobs', item['job_id'])
+    if (_application_exists(store, item['job_id']) or _duplicate_batch(store, item['job_id'], batch['id']) or
+            not job or job.get('availability') == 'closed' or
+            any(job.get(key) != item[key] for key in ('url', 'company', 'title'))):
+        raise ValueError('The listing or application state changed. Review the selected employer role.')
+    listing = _url(payload.get('listing_url'))
+    href = _url(payload.get('observed_href'))
+    destination = _url(payload.get('destination_url'))
+    company = _text(payload.get('observed_company'), 'Observed employer', 1000, True)
+    title = _text(payload.get('observed_title'), 'Observed role title', 1000, True)
+    role_id = _text(payload.get('observed_role_id'), 'Observed role ID', 100, True)
+    if listing != item['url'] or company != item['company'] or title != item['title']:
+        raise ValueError('Observed employer and role must match the reserved listing exactly.')
+    original, target = urlsplit(listing), urlsplit(destination)
+    match = re.fullmatch(r'/careers/positions/([0-9]+)', original.path)
+    if (company != 'Coinbase' or original.netloc != 'www.coinbase.com' or not match or
+            original.fragment or role_id != match.group(1) or
+            parse_qs(original.query, keep_blank_values=True) != {'gh_jid': [role_id]} or
+            target.netloc != 'job-boards.greenhouse.io' or target.path != '/embed/job_app' or target.fragment or
+            parse_qs(target.query, keep_blank_values=True) != {'token': [role_id], 'for': ['coinbase'], 'gh_jid': [role_id]}):
+        raise ValueError('This employer-to-ATS destination is not a supported exact role mapping.')
+    _codex_observation_url(href, destination, exact=True)
+    if urlsplit(href).fragment:
+        raise ValueError('Record the exact observed application link without a fragment.')
+    evidence = {'listing_url': listing, 'observed_href': href, 'destination_url': destination,
+                'observed_company': company, 'observed_title': title, 'observed_role_id': role_id,
+                'observed_at': utcnow()}
+    item.update(application_url=destination, destination_binding=copy.deepcopy(evidence))
+    run['materials'][item['job_id']].update(application_url=destination, destination_binding=copy.deepcopy(evidence))
+    item.setdefault('destination_binding_history', []).append(copy.deepcopy(evidence))
+    _clear_review(item)
+    item['message'] = 'Verified employer application destination recorded. Inspect the actual form again before authorization.'
+    _event(batch, 'codex_destination_bound', item, item['message'])
+    return _save(store, batch)
 
 
 def _codex_check(root, store, batch, run, payload):
@@ -1140,6 +1253,8 @@ def _codex_check(root, store, batch, run, payload):
     authorization = item.get('authorization', {})
     if authorization.get('executor') != 'codex' or authorization.get('run_id') != run['id']:
         raise ValueError('This application has no reviewed Codex authorization.')
+    if authorization.get('application_url', item['url']) != item.get('application_url', item['url']):
+        raise ValueError('The authorized application destination changed. Inspect and authorize it again.')
     job = store.get('jobs', item['job_id'])
     if _application_exists(store, item['job_id']) or not job or job.get('availability') == 'closed' or job.get('url') != item['url']:
         raise ValueError('The listing or application state changed. Check the employer result before continuing.')
@@ -1198,6 +1313,8 @@ def _codex_action(root, store, payload):
         return _authorize(store, root, {**payload, 'batch_id': batch['id']}, codex=True)
     if op == 'codex_check':
         return _codex_check(root, store, batch, run, payload)
+    if op == 'codex_bind_destination':
+        return _codex_bind_destination(root, store, batch, run, payload)
     item = _item(batch, payload.get('job_id'))
     if item.get('codex_run_id') != run['id']:
         raise ValueError('This role is outside the reserved Codex run.')
@@ -1223,9 +1340,11 @@ def _codex_action(root, store, payload):
         if any(field['supported'] and (field['type'] not in allowed or field['type'] in ('select', 'radio', 'multiselect') and not field['options']) for field in fields):
             raise ValueError('Supported Codex controls require a known type and observed choice options.')
         planned = _answers(payload.get('planned_answers', {}))
+        application_url = item.get('application_url', item['url'])
         request.update(fields=fields, planned_answers=planned,
-            observed_url=_codex_observation_url(payload.get('observed_url'), item['url']),
-            form_signature='codex-' + hashlib.sha256(json.dumps({'fields': fields, 'planned_answers': planned}, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
+            observed_url=_codex_observation_url(payload.get('observed_url'), application_url, exact=bool(item.get('application_url'))),
+            form_signature='codex-' + hashlib.sha256(json.dumps({'application_url': application_url, 'fields': fields,
+                'planned_answers': planned}, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
     if payload.get('status') == 'submitting':
         _codex_check(root, store, batch, run, payload)
     if payload.get('status') == 'heartbeat' and _expired(item, datetime.now(timezone.utc)):
