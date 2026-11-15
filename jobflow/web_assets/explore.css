@@ -34,9 +34,9 @@
 #company-role-panel .result-heading { align-items: center; margin-top: 0; margin-bottom: 18px; }
 #company-role-panel .result-heading .button-group { justify-content: flex-end; gap: 6px 18px; }
 .company-logo { overflow: hidden; }
-.company-logo.has-image { background: #fff; border-color: #d8e0e4; }
+.company-logo.has-image { background: transparent; border: 0; border-radius: 0; }
 .company-logo.has-image > span { display: none; }
-.company-logo img { display: block; width: 100%; height: 100%; object-fit: contain; padding: 4px; }
+.company-logo img { display: block; width: 100%; height: 100%; object-fit: contain; padding: 0; }
 .company-logo img[hidden] { display: none; }
 /* Dark surroundings; the logo area keeps a neutral backing so transparent
    black marks remain visible without adding a full-tile white surface. */
