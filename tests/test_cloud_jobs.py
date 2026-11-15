@@ -1,10 +1,13 @@
+import io
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -201,6 +204,39 @@ class CloudWorkerTests(unittest.TestCase):
         self.assertEqual(self.queue.status(account['id'])['status'], 'done')
         self.assertIn('saved schedule', self.queue.status(account['id'])['message'])
         self.assertFalse((root / 'reports/source_health.json').exists())
+
+    def test_workflow_logs_command_duration_and_outcome_without_private_data(self):
+        account, root = self.account('private-owner@example.com')
+        self.reports(root)
+        item = self.item(account, 'run')
+        captured = io.StringIO()
+        result = SimpleNamespace(returncode=0, stdout='private resume text', stderr='private credential')
+        with redirect_stdout(captured), \
+                patch('jobflow.cloud_jobs.time.monotonic', side_effect=[100, 108.25]), \
+                patch('jobflow.cloud_jobs.subprocess.run', return_value=result):
+            run_item(self.accounts, self.queue, item)
+        self.assertEqual(captured.getvalue().splitlines(), [
+            'Jobflow background workflow started: command=run',
+            'Jobflow background workflow finished: command=run outcome=done elapsed_seconds=8.250',
+        ])
+        for private in (account['id'], account['email'], item['claim_token'], str(root),
+                        'private resume text', 'private credential'):
+            self.assertNotIn(private, captured.getvalue())
+
+    def test_timeout_logs_safe_outcome_and_retains_existing_retry_behavior(self):
+        account, unused = self.account()
+        item = self.item(account, 'refresh')
+        captured = io.StringIO()
+        with redirect_stdout(captured), \
+                patch('jobflow.cloud_jobs.time.monotonic', side_effect=[50, 1850]), \
+                patch('jobflow.cloud_jobs.subprocess.run', side_effect=subprocess.TimeoutExpired(
+                    'private command path', 1800, output='private output', stderr='secret')):
+            run_item(self.accounts, self.queue, item)
+        self.assertEqual(captured.getvalue().splitlines(), [
+            'Jobflow background workflow started: command=refresh',
+            'Jobflow background workflow finished: command=refresh outcome=timeout elapsed_seconds=1800.000',
+        ])
+        self.assertEqual(self.queue.status(account['id'])['status'], 'pending')
 
     def test_rematch_has_its_own_cli_without_network_run_or_source_health_claim(self):
         account, root = self.account()

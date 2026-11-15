@@ -149,7 +149,7 @@ async function checkAppVersion() {
   } catch { /* A later focus or periodic check can retry without disrupting work. */ }
 }
 function reloadApp() {
-  if (state.busy || $('#action-dialog')?.open) {toast('Save or close your open edit before reloading.'); return;}
+  if (state.busy || $('#action-dialog')?.open || $('.pdf-review-dialog')?.open) {toast('Save or close your open edit before reloading.'); return;}
   location.reload();
 }
 function navigate(page, filters) { if(filters){state.filters={...state.filters,...filters};if(page==='jobs'&&filters.company!==undefined)state.roleCompany=filters.company;}state.pageIndex=0;const hash=routeHash(page);if(location.hash===hash){state.page=page;render();}else location.hash=hash; }

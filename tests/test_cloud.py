@@ -14,6 +14,7 @@ from jobflow.cloud import CloudServer, validate_origin
 from jobflow.cloud_auth import (AuthError, AuthRateLimitError, EmailSendCooldown,
                                RateLimiter, SupabaseEmailAuth)
 from jobflow.onboarding import initialize_workspace, save_onboarding
+from jobflow.remote import RemoteBusyError
 from jobflow.storage import Store
 
 
@@ -215,6 +216,87 @@ class CloudHTTPTests(unittest.TestCase):
             'workspace_id': first['workspace_id'],
         }, cookie=cookie_two, csrf=csrf_two)
         self.assertEqual(status, 409, result)
+
+    def test_pdf_annotation_edits_do_not_queue_background_refreshes(self):
+        account, unused_root = self.seed('owner@example.com', 'Owner')
+        cookie, csrf, unused = self.login(account['email'])
+
+        def action(op, **fields):
+            status, unused, result = self.request('POST', '/api/action',
+                {'action': 'batch', 'op': op, **fields}, cookie=cookie, csrf=csrf)
+            self.assertEqual(status, 200, result)
+            return result
+
+        source = base64.b64encode(b'%PDF-1.7\nOriginal resume\n%%EOF\n').decode()
+        resume = action('upload_resume', filename='original.pdf', content_base64=source)['resume']
+        text = 'Owner built an actual Python system.'
+        document = {'text': text, 'pages': [{'number': 1, 'width': 612, 'height': 792}],
+                    'lines': [{'page': 1, 'start': 0, 'end': len(text), 'text': text,
+                               'rect': [.1, .1, .8, .05]}]}
+        with patch('jobflow.cloud.remote_enabled', return_value=True), \
+                patch.object(self.server.queue, 'enqueue') as enqueue:
+            review = action('pdf_review_create', resume_id=resume['id'], job_id='shared-id',
+                            document=document)['review']
+            original_revision = review['revision']
+            annotation = {'kind': 'replace', 'start': 0, 'end': len(text), 'before': text,
+                          'after': 'Owner built the documented Python system.', 'note': 'Keep this wording.',
+                          'page': 1, 'rects': [[.1, .1, .8, .05]], 'status': 'accepted', 'source': 'manual'}
+            review = action('pdf_review_update', review_id=review['id'], revision=review['revision'],
+                            annotations=[annotation])['review']
+            status, unused, conflict = self.request('POST', '/api/action', {
+                'action': 'batch', 'op': 'pdf_review_update', 'review_id': review['id'],
+                'revision': original_revision, 'annotations': [],
+            }, cookie=cookie, csrf=csrf)
+            self.assertEqual(status, 409)
+            self.assertEqual(conflict['code'], 'review_conflict')
+            self.assertIs(conflict['retryable'], False)
+            review = action('pdf_review_suggest', review_id=review['id'], revision=review['revision'],
+                            mode='local')['review']
+            reopened = action('pdf_review_create', resume_id=resume['id'], job_id='shared-id',
+                              document=document)['review']
+            self.assertEqual(reopened, review)
+            self.assertEqual(review['annotations'][0]['after'], annotation['after'])
+            self.assertEqual(review['annotations'][0]['note'], annotation['note'])
+            enqueue.assert_not_called()
+            # Saving an actual library version still schedules its reports.
+            for row in review['annotations']:
+                if row['status'] == 'pending':
+                    row['status'] = 'rejected'
+            review = action('pdf_review_update', review_id=review['id'], revision=review['revision'],
+                            annotations=review['annotations'])['review']
+            saved = action('pdf_review_save', review_id=review['id'], revision=review['revision'],
+                           text=review['resolved_text'], content_base64=source, label='Reviewed resume',
+                           confirmed=True)
+            self.assertEqual(saved['review']['status'], 'saved')
+            enqueue.assert_called_once_with(account['id'], 'refresh')
+
+    def test_workspace_contention_is_retryable_only_before_execution_begins(self):
+        account, unused = self.seed('owner@example.com', 'Owner')
+        cookie, csrf, unused = self.login(account['email'])
+        payload = {'action': 'batch', 'op': 'pdf_review_update'}
+        with patch('jobflow.cloud.execution_context') as context, \
+                patch('jobflow.cloud.perform_action') as action:
+            context.return_value.__enter__.side_effect = RemoteBusyError('Lease is held')
+            status, unused, body = self.request('POST', '/api/action', payload, cookie=cookie, csrf=csrf)
+            self.assertEqual(status, 409)
+            self.assertEqual(body['code'], 'workspace_busy')
+            self.assertIs(body['retryable'], True)
+            action.assert_not_called()
+        with patch('jobflow.cloud.perform_action', side_effect=RemoteBusyError('Lease lost after a write')) as action:
+            status, unused, body = self.request('POST', '/api/action', payload, cookie=cookie, csrf=csrf)
+            self.assertEqual(status, 409)
+            self.assertEqual(body['code'], 'workspace_update_uncertain')
+            self.assertIs(body['retryable'], False)
+            action.assert_called_once()
+        # The per-process account lock also rejects before execution, without
+        # converting the rejection into a stale-review conflict.
+        lock = self.server.account_lock(account['id'])
+        with lock, patch('jobflow.cloud.perform_action') as action:
+            status, unused, body = self.request('POST', '/api/action', payload, cookie=cookie, csrf=csrf)
+            self.assertEqual(status, 409)
+            self.assertEqual(body['code'], 'workspace_busy')
+            self.assertIs(body['retryable'], True)
+            action.assert_not_called()
 
     def test_authenticated_dashboard_assets_share_allowlist_and_preserve_binary_types(self):
         self.server.accounts.invite('owner@example.com')

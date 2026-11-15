@@ -29,6 +29,14 @@ from .web import (ASSET_DIRECTORY, STATIC_ASSETS, MAX_REQUEST_BYTES, MAX_UPLOAD_
                   perform_action, profile_summary, snapshot, validate_action_size)
 
 UPLOAD_REQUEST_LIMIT = 7 * 1024 * 1024
+PDF_REVIEW_DRAFT_OPS = frozenset(('pdf_review_create', 'pdf_review_update', 'pdf_review_suggest'))
+
+
+class WorkspaceBusyError(WebError):
+    """A request could not acquire its account lock before changing any data."""
+
+    def __init__(self):
+        super().__init__('Another workspace update is running. Please retry shortly.', 409)
 
 
 def validate_origin(value, host):
@@ -182,7 +190,7 @@ class CloudHandler(JobflowHandler):
         if remote_enabled() and account['id'] not in self._held_account_locks:
             lock = self.server.account_lock(account['id'])
             if not lock.acquire(timeout=10):
-                raise WebError('Another workspace request is running. Please retry shortly.', 409)
+                raise WorkspaceBusyError()
             self._held_account_locks[account['id']] = lock
         root = self.server.accounts.workspace(account)
         if hydrate:
@@ -521,6 +529,8 @@ class CloudHandler(JobflowHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
+        acquiring_workspace = False
+        payload = None
         try:
             self._allowed_host(runner=path == '/api/codex/runner')
             if path == '/api/codex/runner':
@@ -544,12 +554,17 @@ class CloudHandler(JobflowHandler):
             if path == '/api/action':
                 validate_action_size(payload, int(self.headers['Content-Length']))
             account = session['account']
+            # Only contention before entering the execution context is safe to
+            # retry automatically. A later lease loss can follow a committed
+            # write, so it must never invite a blind replay of the request.
+            acquiring_workspace = True
             root = self._root(account)
             lock = self.server.account_lock(account['id'])
             if not lock.acquire(blocking=False):
-                raise WebError('Another update is being saved. Please try again shortly.', 409)
+                raise WorkspaceBusyError()
             try:
                 with execution_context(root):
+                    acquiring_workspace = False
                     hydrate_workspace(root)
                     if path == '/api/onboarding':
                         before = onboarding_state(root)
@@ -583,13 +598,23 @@ class CloudHandler(JobflowHandler):
                             result = self._codex_browser_action(root, account, payload)
                         else:
                             result = perform_action(root, payload)
-                        if remote_enabled():
+                        # Draft annotations do not change preparation or report
+                        # inputs. Queuing a full refresh here makes the worker
+                        # lock out the user's next annotation unnecessarily.
+                        review_draft = (payload.get('action') == 'batch' and
+                                        payload.get('op') in PDF_REVIEW_DRAFT_OPS)
+                        if remote_enabled() and not review_draft:
                             self.server.queue.enqueue(account['id'], 'refresh')
             finally:
                 lock.release()
             self._respond(200, result)
-        except RemoteBusyError:
-            self._respond(409, {'error': 'Another workspace update is running. Please retry shortly.'})
+        except (RemoteBusyError, WorkspaceBusyError):
+            if acquiring_workspace:
+                self._respond(409, {'error': 'Another workspace update is running. Please retry shortly.',
+                                    'code': 'workspace_busy', 'retryable': True})
+            else:
+                self._respond(409, {'error': 'The workspace update could not be confirmed. Refresh to check its saved state before retrying.',
+                                    'code': 'workspace_update_uncertain', 'retryable': False})
         except RemoteError:
             self._respond(503, {'error': 'Your private workspace could not save this change. Please retry shortly.'})
         except AuthRateLimitError:
@@ -601,7 +626,14 @@ class CloudHandler(JobflowHandler):
         except AuthError:
             self._respond(401, {'error': 'Sign-in could not be completed. Request a fresh sign-in email and try again.'})
         except (WebError, ValueError, KeyError, TypeError) as error:
-            self._error(error)
+            if (path == '/api/action' and isinstance(payload, dict) and
+                    payload.get('action') == 'batch' and
+                    isinstance(payload.get('op'), str) and
+                    payload.get('op') in PDF_REVIEW_DRAFT_OPS | {'pdf_review_save'} and
+                    str(error).strip() == 'This PDF review changed. Reload it before saving your changes.'):
+                self._respond(409, {'error': str(error).strip(), 'code': 'review_conflict', 'retryable': False})
+            else:
+                self._error(error)
         except subprocess.TimeoutExpired:
             self._respond(504, {'error': 'The update took too long. Refresh to check its state before retrying.'})
         except (OSError, sqlite3.Error):

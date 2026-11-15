@@ -235,7 +235,9 @@ async function main() {
     assert.equal(app.context.location.reloads, undefined, 'An update never forces a reload');
     app.evaluate('$("#action-dialog").open=true;reloadApp();clearTimeout(state.toastTimer);');
     assert.equal(app.context.location.reloads, undefined, 'Reload waits for an open edit to be closed');
-    app.evaluate('$("#action-dialog").open=false;reloadApp();');
+    app.evaluate('$("#action-dialog").open=false;$(".pdf-review-dialog").open=true;reloadApp();clearTimeout(state.toastTimer);');
+    assert.equal(app.context.location.reloads, undefined, 'Reload preserves an open PDF annotation editor');
+    app.evaluate('$(".pdf-review-dialog").open=false;reloadApp();');
     assert.equal(app.context.location.reloads, 1);
   }
 

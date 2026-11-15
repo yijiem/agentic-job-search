@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-  const state={dialog:null,options:null,library:null,resume:null,jobId:'',pdf:null,pdfBytes:null,document:null,review:null,pages:[],sourceLinks:[],scale:1,activePage:1,mode:'original',previewPdf:null,previewBytes:null,selection:null,editingId:null,busy:false,error:'',notice:'',confirmed:false,setDefault:false,label:'',generation:0,pdfjs:null,rendering:false,noteTool:false,editorDirty:false,closeRequested:false};
+  const state={dialog:null,options:null,library:null,resume:null,jobId:'',pdf:null,pdfBytes:null,document:null,review:null,pages:[],sourceLinks:[],scale:1,activePage:1,mode:'original',previewPdf:null,previewBytes:null,selection:null,editingId:null,busy:false,error:'',notice:'',confirmed:false,setDefault:false,label:'',generation:0,pdfjs:null,rendering:false,noteTool:false,editorDirty:false,closeRequested:false,errorCode:'',draftBase:null,draftConflict:'',draftCanRebase:false,draftStorageError:false,pendingSync:null,syncTimer:null,syncInFlight:false,remoteReview:null};
   const find=selector=>state.dialog?.querySelector(selector);
   const action=(label,op,extra='',primary=false)=>`<button type="button" class="button${primary?' primary':''}" data-pdf-action="${op}" ${extra}${state.busy||state.rendering?' disabled':''}>${label}</button>`;
   const safeLink=url=>{try{const u=new URL(url);return ['http:','https:'].includes(u.protocol)?u.href:'';}catch{return '';}};
@@ -17,14 +17,83 @@
   function countChanges(annotations){return annotations.reduce((counts,a)=>{if(a.kind==='replace')counts[a.status]=(counts[a.status]||0)+1;else counts.notes++;return counts;},{pending:0,accepted:0,rejected:0,notes:0});}
   function normalizedRects(rects,pageRect){return rects.map(r=>[clamp((r.left-pageRect.left)/pageRect.width),clamp((r.top-pageRect.top)/pageRect.height),clamp(r.width/pageRect.width),clamp(r.height/pageRect.height)]).filter(r=>r[2]>0&&r[3]>0);}
   function bytesBase64(bytes){let out='';for(let offset=0;offset<bytes.length;offset+=0x8000)out+=String.fromCharCode(...bytes.subarray(offset,offset+0x8000));return btoa(out);}
-  async function request(path,payload){
-    const options={credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}};
+  const BUSY_DELAYS=[500,1000,2000];
+  async function request(path,payload,controls={}){
+    const generation=state.generation,options={credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}};
     if(payload){options.method='POST';options.headers['Content-Type']='application/json';options.headers['X-CSRF-Token']=state.library?.csrf_token||state.options?.csrfToken||'';options.body=JSON.stringify({action:'batch',...payload,workspace_id:state.library?.workspace_id||state.options?.workspaceId});}
-    const response=await fetch(path,options);let body;
-    try{body=await response.json();}catch{throw new Error('The PDF workspace could not be reached. Try again.');}
-    if(!response.ok||body.error)throw new Error(body.error||'The PDF review could not be saved.');return body;
+    for(let attempt=0;;attempt++){
+      checkActive(generation);
+      const response=await fetch(path,options);let body;
+      try{body=await response.json();}catch{throw new Error('The PDF workspace could not be reached. Your unsaved annotation is kept. Try again.');}
+      checkActive(generation);
+      if(response.ok&&!body.error)return body;
+      // Only the server's explicit pre-mutation refusal is safe to repeat.
+      if(response.status===409&&body.code==='workspace_busy'&&body.retryable===true&&controls.retry!==false&&attempt<BUSY_DELAYS.length){
+        state.notice='Waiting for the workspace to finish saving… Your annotation is kept.';renderSidebar();
+        await new Promise(resolve=>setTimeout(resolve,BUSY_DELAYS[attempt]));continue;
+      }
+      const error=new Error(body.error||'The PDF review could not be saved.');error.code=body.code||'';error.status=response.status;error.retryable=body.retryable===true;throw error;
+    }
   }
-  function setMessage(text,isError=false){state.error=isError?text:'';state.notice=isError?'':text;renderSidebar();renderToolbar();}
+  function recordError(error){state.error=error.message;state.errorCode=error.code||'';state.notice='';persistDraft();}
+  function draftKey(){const workspace=state.library?.workspace_id,resume=state.options?.resumeId;return workspace&&resume?'jobflow.pdf-draft.v1:'+JSON.stringify([workspace,resume,state.jobId||'']):null;}
+  function clearDraft(){const key=draftKey();try{if(key)window.sessionStorage?.removeItem(key);}catch{}state.draftBase=null;state.draftConflict='';state.draftCanRebase=false;}
+  function persistDraft(){
+    const key=draftKey();if(!key||!state.review||(!state.pendingSync&&(!state.editorDirty||!state.selection)))return;
+    const draft={version:1,reviewId:state.review.id,sourceSha:state.review.source_sha256||'',selection:state.editorDirty?state.selection:null,editingId:state.editingId,base:state.draftBase,pending:state.pendingSync};
+    try{if(!window.sessionStorage)throw new Error('Storage unavailable');const encoded=JSON.stringify(draft);if(encoded.length>=1200000)throw new Error('Recovery copy too large');window.sessionStorage.setItem(key,encoded);state.draftStorageError=false;}catch{state.draftStorageError=true;}
+  }
+  function validateDraft(){
+    state.draftConflict='';state.draftCanRebase=false;if(!state.editorDirty||!state.selection)return;
+    const selection=state.selection,current=state.review.annotations.find(a=>a.id===state.editingId);
+    if(state.review.status!=='draft')state.draftConflict='This review was saved elsewhere. Your unsaved wording is kept below; copy it before opening a new review.';
+    else if(selection.before&&state.document.text.slice(selection.start,selection.end)!==selection.before)state.draftConflict='The selected PDF text changed. Your wording is kept below; copy it, cancel, and select the text again.';
+    else if(state.editingId&&JSON.stringify(current)!==JSON.stringify(state.draftBase)){
+      state.draftConflict=current?'This annotation changed elsewhere. Compare the latest saved wording below before choosing to use your edit.':'This annotation was removed elsewhere. Your wording is kept below; copy it, cancel, and select the text again.';
+      state.draftCanRebase=!!current;
+    }
+  }
+  function readDraft(){const key=draftKey();try{const raw=key&&window.sessionStorage?.getItem(key);return raw&&raw.length<1200000?JSON.parse(raw):null;}catch{return null;}}
+  function restoreDraft(){
+    const draft=readDraft();if(!state.review||draft?.version!==1||draft.reviewId!==state.review.id||(draft.sourceSha||'')!==(state.review.source_sha256||''))return false;
+    let restored=false;
+    if(draft.pending&&Array.isArray(draft.pending.annotations)&&Number.isInteger(draft.pending.revision)){
+      state.pendingSync=draft.pending;state.remoteReview=state.review;
+      if(state.review.revision!==draft.pending.revision||state.review.status!=='draft')state.pendingSync.blocked=true;
+      state.review={...state.review,annotations:state.pendingSync.annotations};restored=true;scheduleSync();
+    }
+    const selection=draft.selection;
+    if(selection&&['note','replace'].includes(selection.kind)&&Number.isInteger(selection.start)&&Number.isInteger(selection.end)&&Number.isInteger(selection.page)&&typeof selection.before==='string'&&typeof selection.after==='string'&&typeof selection.note==='string'&&selection.after.length<=20000&&selection.note.length<=4000&&Array.isArray(selection.rects)&&(draft.editingId===null||typeof draft.editingId==='string')){
+      state.selection=selection;state.editingId=draft.editingId;state.draftBase=draft.base||null;state.editorDirty=true;state.confirmed=false;validateDraft();restored=true;
+    }
+    if(restored)state.notice=state.pendingSync?'Recovered annotations saved in this tab. Waiting to sync.':'Restored your unsaved annotation from this browser tab.';return restored;
+  }
+  function stopSync(){if(state.syncTimer!==null)clearTimeout(state.syncTimer);state.syncTimer=null;}
+  function scheduleSync(){
+    stopSync();if(!state.pendingSync||state.pendingSync.blocked||!state.dialog?.open)return;
+    const generation=state.generation;state.syncTimer=setTimeout(()=>{state.syncTimer=null;if(generation===state.generation)syncPending();},10000);
+  }
+  function keepPending(annotations){
+    if(!state.pendingSync)state.pendingSync={revision:state.review.revision,annotations,sequence:0,blocked:false};
+    state.pendingSync.annotations=annotations;state.pendingSync.sequence++;if(state.pendingSync.validationError){state.pendingSync.blocked=false;state.pendingSync.validationError=false;state.error='';}state.review={...state.review,annotations};
+    state.confirmed=false;state.previewBytes=null;state.notice='Saved in this tab; waiting to sync. You can keep annotating.';persistDraft();scheduleSync();
+  }
+  async function syncPending(){
+    if(!state.pendingSync||state.pendingSync.blocked||state.syncInFlight||!state.dialog?.open)return;
+    if(state.busy){scheduleSync();return;}
+    const generation=state.generation,pending=state.pendingSync,snapshot=JSON.parse(JSON.stringify(pending));state.syncInFlight=true;
+    try{
+      const response=await request('/api/action',{op:'pdf_review_update',review_id:state.review.id,revision:snapshot.revision,annotations:snapshot.annotations},{retry:false});
+      if(generation!==state.generation)return;
+      if(state.pendingSync?.sequence===snapshot.sequence){state.pendingSync=null;state.review=response.review;state.remoteReview=null;clearDraft();if(state.editorDirty){state.draftBase=state.editingId?JSON.parse(JSON.stringify(state.review.annotations.find(a=>a.id===state.editingId)||null)):null;persistDraft();}state.notice='Annotations synced. Your current unsaved wording is kept.';}
+      else if(state.pendingSync){state.pendingSync.revision=response.review.revision;state.review={...response.review,annotations:state.pendingSync.annotations};persistDraft();}
+    }catch(error){
+      if(generation!==state.generation)return;
+      if(error.code==='workspace_busy'&&error.retryable){state.notice='Saved in this tab; waiting to sync. You can keep annotating.';}
+      else if(state.pendingSync){state.pendingSync.blocked=true;state.pendingSync.validationError=error.status===400;state.error=error.message;state.errorCode=error.code;state.notice='Your queued annotations are kept in this tab. Refresh to compare the saved review before continuing.';persistDraft();}
+    }finally{if(generation===state.generation){state.syncInFlight=false;scheduleSync();renderSidebar();renderToolbar();renderOverlays();}}
+  }
+  function setMessage(text,isError=false){state.error=isError?text:'';state.errorCode='';state.notice=isError?'':text;renderSidebar();renderToolbar();}
   function checkActive(generation){if(generation!==state.generation||!state.dialog?.open)throw new Error('PDF review closed.');}
   function dialogShell(){return `<header class="pdf-review-header"><div><span class="pdf-review-eyebrow">Resume review</span><h2 id="pdf-review-title">${esc(state.resume?.label||'Opening your PDF…')}</h2><p id="pdf-review-subtitle">Select text to suggest an edit, then review and save a separate revision.</p></div><button class="icon-button" type="button" data-pdf-action="close" aria-label="Close PDF review">×</button></header><div id="pdf-review-toolbar" class="pdf-review-toolbar"></div><div class="pdf-review-body"><section class="pdf-review-viewport" aria-label="PDF document"><div id="pdf-review-pages" class="pdf-review-pages"><div class="pdf-review-loading"><span class="spinner"></span>Rendering your PDF…</div></div></section><aside id="pdf-review-sidebar" class="pdf-review-sidebar" aria-label="Edits and suggestions"></aside></div>`;}
   function renderToolbar(){
@@ -34,7 +103,7 @@
   }
   function selectionEditor(){
     const selection=state.selection;if(!selection)return `<div class="pdf-selection-help"><span aria-hidden="true">↖</span><h3>Select text on the PDF</h3><p>Highlight a sentence to replace it or add a comment. Your notes and decisions are saved in this private review.</p></div>`;
-    return `<section class="pdf-annotation-editor"><div class="pdf-card-head"><h3>${state.editingId?'Edit annotation':'Annotate selection'}</h3>${action('Cancel','cancel-selection')}</div><p class="pdf-selection-page">Page ${selection.page}</p><blockquote>${esc(selection.before||'Page note')}</blockquote><form id="pdf-annotation-form"><label for="pdf-annotation-kind">Annotation type</label><select id="pdf-annotation-kind"><option value="replace"${selection.kind==='replace'?' selected':''}${!selection.before?' disabled':''}>Replace selected text</option><option value="note"${selection.kind==='note'?' selected':''}>Comment only</option></select><label for="pdf-annotation-after">Suggested replacement</label><textarea id="pdf-annotation-after" rows="5" maxlength="20000"${selection.kind==='note'?' disabled':''}>${esc(selection.after??selection.before)}</textarea><label for="pdf-annotation-note">Comment or explanation</label><textarea id="pdf-annotation-note" rows="2" maxlength="4000">${esc(selection.note||'')}</textarea><button type="submit" class="button primary"${state.busy||state.rendering?' disabled':''}>${state.editingId?'Save annotation':'Add annotation'}</button></form></section>`;
+    return `<section class="pdf-annotation-editor"><div class="pdf-card-head"><h3>${state.editingId?'Edit annotation':'Annotate selection'}</h3>${action('Cancel','cancel-selection')}</div><p class="pdf-selection-page">Page ${selection.page}</p><blockquote>${esc(selection.before||'Page note')}</blockquote><form id="pdf-annotation-form"><label for="pdf-annotation-kind">Annotation type</label><select id="pdf-annotation-kind"${state.busy?' disabled':''}><option value="replace"${selection.kind==='replace'?' selected':''}${!selection.before?' disabled':''}>Replace selected text</option><option value="note"${selection.kind==='note'?' selected':''}>Comment only</option></select><label for="pdf-annotation-after">Suggested replacement</label><textarea id="pdf-annotation-after" rows="5" maxlength="20000"${selection.kind==='note'||state.busy?' disabled':''}>${esc(selection.after??selection.before)}</textarea><label for="pdf-annotation-note">Comment or explanation</label><textarea id="pdf-annotation-note" rows="2" maxlength="4000"${state.busy?' disabled':''}>${esc(selection.note||'')}</textarea><button type="submit" class="button primary"${state.busy||state.rendering||state.draftConflict?' disabled':''}>${state.editingId?'Save annotation':'Add annotation'}</button></form></section>`;
   }
   function annotationCard(annotation,index){
     const current=state.editingId===annotation.id;
@@ -44,16 +113,24 @@
     return `<article class="pdf-annotation-card ${esc(annotation.status)}${current?' is-active':''}" data-pdf-card="${esc(annotation.id)}"><div class="pdf-card-head"><button type="button" class="pdf-anchor-link" data-pdf-action="focus" data-annotation-id="${esc(annotation.id)}">${index+1} · Page ${annotation.page}</button><span class="pdf-review-badge">${esc(status)}</span></div><span class="pdf-annotation-source">${esc(origin)}</span>${annotation.kind==='replace'?`<div class="pdf-edit-diff"><del>${esc(annotation.before)}</del><ins>${esc(annotation.after||'[Remove selected text]')}</ins></div>`:`<blockquote>${esc(annotation.before)}</blockquote>`}${annotation.note?`<p>${esc(annotation.note)}</p>`:''}${annotation.reason?`<p class="pdf-edit-reason">${esc(annotation.reason)}</p>`:''}${sources.length?`<details><summary>Supporting evidence</summary><ul>${sources.map(s=>{const url=safeLink(typeof s==='object'?s.url:'');return `<li>${url?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(s.title||s.label||url)}</a>`:esc(typeof s==='string'?s:s.text||s.label||s.title||'Saved resume')}</li>`;}).join('')}</ul></details>`:''}<div class="pdf-card-actions">${annotation.kind==='replace'&&annotation.status!=='accepted'?action('Accept','accept',`data-annotation-id="${esc(annotation.id)}"`):''}${annotation.kind==='replace'&&annotation.status!=='rejected'?action('Reject','reject',`data-annotation-id="${esc(annotation.id)}"`):''}${action('Edit','edit',`data-annotation-id="${esc(annotation.id)}"`)}${action('Remove','remove',`data-annotation-id="${esc(annotation.id)}"`)}</div></article>`;
   }
   function renderSidebar(){
+    const active=find(':focus'),editing=active&&['pdf-annotation-after','pdf-annotation-note'].includes(active.id)?{id:active.id,start:active.selectionStart,end:active.selectionEnd,direction:active.selectionDirection}:null;
+    renderSidebarContent();
+    if(editing){const replacement=find('#'+editing.id);if(replacement&&!replacement.disabled){replacement.focus?.({preventScroll:true});replacement.setSelectionRange?.(editing.start,editing.end,editing.direction);}}
+  }
+  function renderSidebarContent(){
     const sidebar=find('#pdf-review-sidebar');if(!sidebar)return;
     const review=state.review,counts=countChanges(review?.annotations||[]),ai=state.library?.pdf_ai||state.library?.resume_ai||{};
-    const error=state.error?`<p class="pdf-review-error" role="alert">${esc(state.error)} ${review?action('Refresh review','reload'):''}</p>`:'';
-    const notice=state.notice?`<p class="pdf-review-notice" role="status">${esc(state.notice)}</p>`:'';
-    const closePrompt=state.closeRequested?`<section class="pdf-annotation-editor"><h3>Keep your unsaved annotation?</h3><p>Save the annotation before closing, or discard the text you have not saved.</p><div class="pdf-card-actions">${action('Keep editing','keep-editing')}${action('Discard & close','discard-close')}</div></section>`:'';
+    const syncNotice=state.pendingSync?`<section class="pdf-annotation-editor" role="status"><p>${state.pendingSync.blocked?(state.pendingSync.validationError?'Correct the queued annotation error to resume syncing.':'Your queued annotations need review before syncing.'):'Saved in this tab; waiting to sync. You can keep annotating.'}</p>${state.pendingSync.blocked?action('Refresh saved review','reload'):''}${state.pendingSync.blocked&&state.remoteReview?`<details><summary>Latest saved annotations</summary>${state.remoteReview.annotations.map(a=>`<blockquote>${esc(a.after||a.before||'Page note')}</blockquote><p>${esc(a.note||'')}</p>`).join('')}</details>${action('Discard queued changes & load saved review','discard-queued')}`:''}</section>`:'';
+    const error=state.error?`<p class="pdf-review-error" role="alert">${esc(state.error)} ${state.errorCode==='workspace_busy'?'Your unsaved annotation is kept. Try saving it again shortly.':review?action('Refresh review','reload'):''}</p>`:'';
+    const draftWarning=state.draftConflict?`<section class="pdf-annotation-editor" role="alert"><p>${esc(state.draftConflict)}</p>${state.draftCanRebase?`<h3>Latest saved annotation</h3><blockquote>${esc(state.review.annotations.find(a=>a.id===state.editingId)?.after||'')}</blockquote><p>${esc(state.review.annotations.find(a=>a.id===state.editingId)?.note||'')}</p>${action('Use my edit on this version','rebase-draft')}`:''}</section>`:'';
+    const storageWarning=state.draftStorageError?'<p role="alert" class="pdf-review-error">This browser cannot keep a recovery copy. Keep this page open or copy your unsaved wording before reloading.</p>':'';
+    const notice=state.notice&&!(state.pendingSync&&state.notice==='Saved in this tab; waiting to sync. You can keep annotating.')?`<p class="pdf-review-notice" role="status">${esc(state.notice)}</p>`:'';
+    const closePrompt=state.closeRequested?`<section class="pdf-annotation-editor"><h3>Keep your unsaved annotations?</h3><p>Keep editing while your changes wait to sync, or discard the changes that have not reached the saved review.</p><div class="pdf-card-actions">${action('Keep editing','keep-editing')}${action('Discard & close','discard-close')}</div></section>`:'';
     if(!review){sidebar.innerHTML=`${error}${notice}<div class="pdf-selection-help"><h3>View, annotate, revise</h3><p>Your PDF is rendered locally. Proposed edits stay separate from the original.</p></div>`;return;}
-    if(review.status==='saved'){sidebar.innerHTML=`${error}${notice}<div class="pdf-saved-result"><span class="pdf-review-badge">Revision saved</span><h3>Your new PDF is ready</h3><p>It is a separate version in your resume library and can be selected for future applications.</p><a class="button primary" href="/api/application-resumes/${encodeURIComponent(review.saved_resume_id)}" target="_blank" rel="noopener noreferrer">Open saved revision ↗</a>${action('Return to library','close')}</div>`;return;}
+    if(review.status==='saved'){sidebar.innerHTML=`${error}${notice}${syncNotice}${draftWarning}${storageWarning}${closePrompt}${state.editorDirty?selectionEditor():''}${state.pendingSync?`<section class="pdf-annotations"><h3>Unsynced annotations kept in this tab</h3>${state.pendingSync.annotations.map((a,i)=>`<article class="pdf-annotation-card"><p>${i+1} · Page ${a.page}</p><blockquote>${esc(a.before||'Page note')}</blockquote><p>${esc(a.after||'')}</p><p>${esc(a.note||'')}</p></article>`).join('')}</section>`:''}<div class="pdf-saved-result"><span class="pdf-review-badge">Revision saved</span><h3>Your new PDF is ready</h3><p>It is a separate version in your resume library and can be selected for future applications.</p><a class="button primary" href="/api/application-resumes/${encodeURIComponent(review.saved_resume_id)}" target="_blank" rel="noopener noreferrer">Open saved revision ↗</a>${action('Return to library','close')}</div>`;return;}
     const roleTitle=state.options.jobTitle||[review.company,review.job_title].filter(Boolean).join(' · ')||'Selected application role';
     const tailoring=state.jobId?`<section class="pdf-suggestion-tools"><span class="pdf-review-eyebrow">Tailor for your application</span><p>${esc(roleTitle)}</p><div class="pdf-suggest-buttons">${action('Suggest from role evidence','suggest-local')}${action('Generate AI suggestions','suggest-ai',!ai.ai_available?'disabled':'')}</div><p class="pdf-review-hint">${ai.ai_available?'AI suggestions are drafts grounded in your resume. Review every claim before accepting.':esc(ai.ai_reason||'Role suggestions use your saved text and the recorded job. AI rewriting is not connected for this workspace.')}</p></section>`:'<section class="pdf-suggestion-tools"><span class="pdf-review-eyebrow">General resume review</span><p>Edit and comment on your saved resume.</p></section>';
-    sidebar.innerHTML=`${error}${notice}${closePrompt}${tailoring}${selectionEditor()}<section class="pdf-annotations"><div class="pdf-card-head"><h3>Edits & comments</h3><span>${counts.accepted} accepted · ${counts.pending} to review</span></div>${review.annotations.length?review.annotations.map(annotationCard).join(''):'<p class="pdf-review-hint">Your annotations and proposed changes will appear here, linked to the source text.</p>'}</section><form id="pdf-save-revision" class="pdf-save-revision"><h3>Save a separate revision</h3><p>Accepted edits are typeset into a clean PDF. The layout may differ from the original. Replaced text is removed from the new file.</p><label for="pdf-revision-label">Version name</label><input id="pdf-revision-label" maxlength="200" required value="${esc(state.label)}"><label class="pdf-review-check"><input id="pdf-revision-confirm" type="checkbox"${state.confirmed?' checked':''}> I reviewed the accepted edits and the new PDF preview.</label><label class="pdf-review-check"><input id="pdf-revision-default" type="checkbox"${state.setDefault?' checked':''}> Use this version by default</label>${state.editorDirty?'<p class="pdf-review-hint">Save or cancel your annotation before saving a PDF revision.</p>':''}${!counts.accepted?'<p class="pdf-review-hint">Accept at least one text edit to create a revision. Comments are saved separately in this review.</p>':''}${counts.pending?`<p class="pdf-review-hint">Accept or reject ${counts.pending} pending edit${counts.pending===1?'':'s'} before saving.</p>`:''}${action('Preview accepted edits','preview')}<button type="submit" class="button primary"${state.busy||state.editorDirty||!state.confirmed||counts.pending||!counts.accepted||!state.previewBytes?' disabled':''}>Confirm & save PDF revision</button></form>`;
+    sidebar.innerHTML=`${error}${notice}${syncNotice}${draftWarning}${storageWarning}${closePrompt}${tailoring}${selectionEditor()}<section class="pdf-annotations"><div class="pdf-card-head"><h3>Edits & comments</h3><span>${counts.accepted} accepted · ${counts.pending} to review</span></div>${review.annotations.length?review.annotations.map(annotationCard).join(''):'<p class="pdf-review-hint">Your annotations and proposed changes will appear here, linked to the source text.</p>'}</section><form id="pdf-save-revision" class="pdf-save-revision"><h3>Save a separate revision</h3><p>Accepted edits are typeset into a clean PDF. The layout may differ from the original. Replaced text is removed from the new file.</p><label for="pdf-revision-label">Version name</label><input id="pdf-revision-label" maxlength="200" required value="${esc(state.label)}"><label class="pdf-review-check"><input id="pdf-revision-confirm" type="checkbox"${state.confirmed?' checked':''}> I reviewed the accepted edits and the new PDF preview.</label><label class="pdf-review-check"><input id="pdf-revision-default" type="checkbox"${state.setDefault?' checked':''}> Use this version by default</label>${state.editorDirty?'<p class="pdf-review-hint">Save or cancel your annotation before saving a PDF revision.</p>':''}${!counts.accepted?'<p class="pdf-review-hint">Accept at least one text edit to create a revision. Comments are saved separately in this review.</p>':''}${counts.pending?`<p class="pdf-review-hint">Accept or reject ${counts.pending} pending edit${counts.pending===1?'':'s'} before saving.</p>`:''}${action('Preview accepted edits','preview')}<button type="submit" class="button primary"${state.busy||state.editorDirty||state.pendingSync||!state.confirmed||counts.pending||!counts.accepted||!state.previewBytes?' disabled':''}>Confirm & save PDF revision</button></form>`;
   }
   function pdfOptions(data){return {data,isEvalSupported:false,enableXfa:false,useSystemFonts:true,useWasm:false,standardFontDataUrl:'/vendor/pdfjs/standard_fonts/',cMapUrl:'/vendor/pdfjs/cmaps/',cMapPacked:true};}
   function loadScript(src,globalName){if(window[globalName])return Promise.resolve();return new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=src;script.onload=()=>window[globalName]?resolve():reject(new Error('The PDF exporter did not initialize.'));script.onerror=()=>{script.remove();reject(new Error('The PDF exporter could not be loaded. Reload the app and try again.'));};document.head.appendChild(script);});}
@@ -130,17 +207,29 @@
     const before=state.document.text.slice(start.position,end.position);if(!before.trim())return;
     state.selection={kind:'replace',start:start.position,end:end.position,before,after:before,note:'',page:start.page,rects:normalizedRects(Array.from(range.getClientRects()),page.getBoundingClientRect())};state.editingId=null;state.editorDirty=false;state.error='';renderSidebar();
   }
+  function finishEditor(){clearDraft();state.selection=null;state.editingId=null;state.editorDirty=false;state.closeRequested=false;persistDraft();}
   async function updateAnnotations(annotations,notice){
-    if(state.busy)return;const generation=state.generation;state.busy=true;state.error='';renderSidebar();
-    try{const response=await request('/api/action',{op:'pdf_review_update',review_id:state.review.id,revision:state.review.revision,annotations});if(generation!==state.generation)return;state.review=response.review;state.confirmed=false;state.previewBytes=null;state.selection=null;state.editingId=null;state.editorDirty=false;state.closeRequested=false;state.notice=notice;renderOverlays();}
-    catch(error){if(generation===state.generation)state.error=error.message;}
+    if(state.busy||state.draftConflict)return;
+    if(state.pendingSync){keepPending(annotations);finishEditor();renderSidebar();renderOverlays();return;}
+    const generation=state.generation;persistDraft();state.busy=true;state.error='';state.errorCode='';renderSidebar();
+    try{const response=await request('/api/action',{op:'pdf_review_update',review_id:state.review.id,revision:state.review.revision,annotations});if(generation!==state.generation)return;state.review=response.review;state.confirmed=false;state.previewBytes=null;finishEditor();state.notice=notice;renderOverlays();}
+    catch(error){if(generation===state.generation){if(error.code==='workspace_busy'&&error.retryable){keepPending(annotations);finishEditor();renderOverlays();}else recordError(error);}}
     finally{if(generation===state.generation){state.busy=false;renderSidebar();renderToolbar();}}
   }
-  async function createReview(){const generation=state.generation;const response=await request('/api/action',{op:'pdf_review_create',resume_id:state.options.resumeId,...(state.jobId?{job_id:state.jobId}:{}),document:state.document});checkActive(generation);state.review=response.review;state.confirmed=false;state.previewBytes=null;state.selection=null;state.editingId=null;state.editorDirty=false;renderSidebar();renderOverlays();}
+  async function createReview(){
+    const generation=state.generation;
+    // Existing reviews are readable while a long-running worker owns the write lease.
+    const listing=await request('/api/resume-reviews?resume_id='+encodeURIComponent(state.options.resumeId));
+    const recovery=readDraft(),candidate=listing.reviews?.find(row=>row.id===recovery?.reviewId)||listing.reviews?.find(row=>row.status==='draft'&&(row.job_id||'')===state.jobId);
+    let review;
+    if(candidate){const response=await request('/api/resume-reviews/'+encodeURIComponent(candidate.id));const existing=response.review;if(existing.resume_id===state.options.resumeId&&(existing.job_id||'')===state.jobId&&existing.document?.text===state.document.text&&existing.source_sha256===state.resume.sha256)review=existing;}
+    if(!review){const response=await request('/api/action',{op:'pdf_review_create',resume_id:state.options.resumeId,...(state.jobId?{job_id:state.jobId}:{}),document:state.document});review=response.review;}
+    checkActive(generation);state.review=review;state.confirmed=false;state.previewBytes=null;state.selection=null;state.editingId=null;state.editorDirty=false;restoreDraft();renderSidebar();renderOverlays();
+  }
   async function suggestions(provider){
-    if(!state.jobId||state.busy)return;const generation=state.generation;state.busy=true;state.error='';state.notice=provider==='ai'?'Preparing AI suggestions…':'Matching your existing evidence to the role…';renderSidebar();renderToolbar();
+    if(!state.jobId||state.busy||state.editorDirty||state.pendingSync)return;const generation=state.generation;state.busy=true;state.error='';state.notice=provider==='ai'?'Preparing AI suggestions…':'Matching your existing evidence to the role…';renderSidebar();renderToolbar();
     try{const response=await request('/api/action',{op:'pdf_review_suggest',review_id:state.review.id,revision:state.review.revision,mode:provider});if(generation!==state.generation)return;state.review=response.review;state.confirmed=false;state.previewBytes=null;state.notice=response.message||'Suggestions are ready. Accept, reject, or edit each proposal.';renderOverlays();}
-    catch(error){if(generation===state.generation){state.error=error.message;state.notice='';}}
+    catch(error){if(generation===state.generation){recordError(error);}}
     finally{if(generation===state.generation){state.busy=false;renderSidebar();renderToolbar();}}
   }
   function layoutParagraphs(text){
@@ -185,10 +274,10 @@
     finally{if(generation===state.generation){state.busy=false;renderSidebar();renderToolbar();}}
   }
   async function saveRevision(){
-    if(state.busy||state.editorDirty||!state.confirmed||!state.previewBytes||countChanges(state.review.annotations).pending||!countChanges(state.review.annotations).accepted)return;
+    if(state.busy||state.editorDirty||state.pendingSync||!state.confirmed||!state.previewBytes||countChanges(state.review.annotations).pending||!countChanges(state.review.annotations).accepted)return;
     const generation=state.generation;state.busy=true;state.error='';renderSidebar();renderToolbar();
-    try{const text=applyEdits(state.document.text,state.review.annotations);const response=await request('/api/action',{op:'pdf_review_save',review_id:state.review.id,revision:state.review.revision,text,content_base64:bytesBase64(state.previewBytes),label:state.label,confirmed:true,set_default:state.setDefault});if(generation!==state.generation)return;state.review=response.review||{...state.review,status:'saved',saved_resume_id:response.resume.id};state.notice='Saved as a separate PDF revision. Your original is still in the library.';await state.options.onSaved?.(response.resume);}
-    catch(error){if(generation===state.generation)state.error=error.message;}
+    try{const text=applyEdits(state.document.text,state.review.annotations);const response=await request('/api/action',{op:'pdf_review_save',review_id:state.review.id,revision:state.review.revision,text,content_base64:bytesBase64(state.previewBytes),label:state.label,confirmed:true,set_default:state.setDefault});if(generation!==state.generation)return;clearDraft();state.review=response.review||{...state.review,status:'saved',saved_resume_id:response.resume.id};state.notice='Saved as a separate PDF revision. Your original is still in the library.';await state.options.onSaved?.(response.resume);}
+    catch(error){if(generation===state.generation)recordError(error);}
     finally{if(generation===state.generation){state.busy=false;renderSidebar();renderToolbar();}}
   }
   function focusAnnotation(id){
@@ -197,42 +286,44 @@
     state.activePage=annotation.page;find(`.pdf-page[data-page="${annotation.page}"]`)?.scrollIntoView({behavior:'smooth',block:'start'});find(`[data-pdf-card="${id}"]`)?.scrollIntoView({behavior:'smooth',block:'nearest'});state.dialog.querySelectorAll('.pdf-annotation-card.is-active').forEach(card=>card.classList.remove('is-active'));find(`[data-pdf-card="${id}"]`)?.classList.add('is-active');renderToolbar();
   }
   async function click(event){
-    const target=event.target.closest?.('[data-pdf-action]');if(!target){if(state.noteTool&&!state.busy&&state.mode==='original'){const page=event.target.closest?.('.pdf-page');if(page){const box=page.getBoundingClientRect(),pageNumber=Number(page.dataset.page),x=clamp((event.clientX-box.left)/box.width,0,.98),y=clamp((event.clientY-box.top)/box.height,0,.98);state.selection={kind:'note',start:0,end:0,before:'',after:'',note:'',page:pageNumber,rects:[[x,y,.02,.02]]};state.editingId=null;state.noteTool=false;renderSidebar();renderToolbar();find('#pdf-annotation-note')?.focus();}}return;}const op=target.dataset.pdfAction;if(op==='close'){requestClose();return;}if(op==='discard-close'){close();return;}if(op==='keep-editing'){state.closeRequested=false;renderSidebar();return;}if(state.busy||state.rendering)return;
-    if(state.editorDirty&&['reload','edit','remove','accept','reject','page-note'].includes(op)){setMessage('Save or cancel your annotation before changing this review.',true);return;}
+    const target=event.target.closest?.('[data-pdf-action]');if(!target){if(state.noteTool&&!state.busy&&state.mode==='original'){const page=event.target.closest?.('.pdf-page');if(page){const box=page.getBoundingClientRect(),pageNumber=Number(page.dataset.page),x=clamp((event.clientX-box.left)/box.width,0,.98),y=clamp((event.clientY-box.top)/box.height,0,.98);state.selection={kind:'note',start:0,end:0,before:'',after:'',note:'',page:pageNumber,rects:[[x,y,.02,.02]]};state.editingId=null;state.noteTool=false;renderSidebar();renderToolbar();find('#pdf-annotation-note')?.focus();}}return;}const op=target.dataset.pdfAction;if(state.syncInFlight&&['reload','discard-queued','discard-close'].includes(op)){setMessage('An annotation is finishing its save. Please wait before refreshing or discarding changes.');return;}if(op==='close'){requestClose();return;}if(op==='discard-close'){stopSync();state.pendingSync=null;clearDraft();state.editorDirty=false;close();return;}if(op==='keep-editing'){state.closeRequested=false;renderSidebar();return;}if(state.busy||state.rendering)return;
+    if(state.editorDirty&&['edit','remove','accept','reject','page-note','suggest-local','suggest-ai','confirm-ai'].includes(op)){setMessage('Save or cancel your annotation before changing this review.',true);return;}
     if(op==='page-note'){state.noteTool=!state.noteTool;state.notice=state.noteTool?'Click a point on the PDF to attach a comment.':'';renderSidebar();renderToolbar();return;}
-    if(op==='cancel-selection'){state.selection=null;state.editingId=null;state.editorDirty=false;state.closeRequested=false;renderSidebar();return;}
+    if(op==='cancel-selection'){finishEditor();renderSidebar();return;}
     if(op==='preview'){await preview();return;}
     if(op==='original'){state.mode='original';state.activePage=1;await renderPages();renderSidebar();return;}
     if(op==='zoom-in'||op==='zoom-out'||op==='fit'){if(op==='fit'){const generation=state.generation,pdf=state.mode==='preview'?state.previewPdf:state.pdf;if(!pdf)return;const page=await pdf.getPage(1);checkActive(generation);state.scale=clamp(((find('.pdf-review-viewport')?.clientWidth||800)-60)/page.getViewport({scale:1}).width,.5,2);}else state.scale=clamp(state.scale+(op==='zoom-in'?.15:-.15),.5,2);await renderPages();return;}
     if(op==='suggest-local'||op==='suggest-ai'){if(op==='suggest-ai'){if(!state.library?.pdf_ai?.ai_available)return;showAIDisclosure();return;}await suggestions('local');return;}
     if(op==='confirm-ai'){await suggestions('ai');return;}
-    if(op==='reload'){const generation=state.generation;try{const response=await request('/api/resume-reviews/'+encodeURIComponent(state.review.id));if(generation!==state.generation)return;state.review=response.review;state.error='';state.selection=null;state.editingId=null;state.confirmed=false;state.previewBytes=null;renderSidebar();renderOverlays();}catch(error){if(generation===state.generation)setMessage(error.message,true);}return;}
+    if(op==='discard-queued'&&state.remoteReview){stopSync();state.pendingSync=null;state.review=state.remoteReview;state.remoteReview=null;clearDraft();state.error='';state.notice='Loaded the saved annotations.';validateDraft();persistDraft();renderSidebar();renderOverlays();return;}
+    if(op==='rebase-draft'&&state.draftCanRebase){state.draftBase=JSON.parse(JSON.stringify(state.review.annotations.find(a=>a.id===state.editingId)));validateDraft();persistDraft();state.notice='Your edit is ready to save against the latest annotation.';renderSidebar();return;}
+    if(op==='reload'){const generation=state.generation;persistDraft();state.busy=true;renderSidebar();try{const response=await request('/api/resume-reviews/'+encodeURIComponent(state.review.id));if(generation!==state.generation)return;if(state.pendingSync){state.remoteReview=response.review;if(response.review.revision!==state.pendingSync.revision||response.review.status!=='draft')state.pendingSync.blocked=true;state.review={...response.review,annotations:state.pendingSync.annotations};}else state.review=response.review;state.error='';state.errorCode='';state.confirmed=false;state.previewBytes=null;validateDraft();persistDraft();state.notice=state.editorDirty?'Review refreshed. Your unsaved annotation is kept.':'';renderOverlays();}catch(error){if(generation===state.generation)recordError(error);}finally{if(generation===state.generation){state.busy=false;renderSidebar();renderToolbar();}}return;}
     const id=target.dataset.annotationId,annotation=state.review?.annotations.find(a=>a.id===id);if(!annotation)return;
     if(op==='focus'){focusAnnotation(id);return;}
-    if(op==='edit'){state.selection={...annotation};state.editingId=id;state.editorDirty=false;renderSidebar();find('#pdf-annotation-after')?.focus();return;}
+    if(op==='edit'){state.selection={...annotation};state.draftBase=JSON.parse(JSON.stringify(annotation));state.draftConflict='';state.editingId=id;state.editorDirty=false;renderSidebar();find('#pdf-annotation-after')?.focus();return;}
     if(op==='remove'){await updateAnnotations(state.review.annotations.filter(a=>a.id!==id),'Annotation removed from this review.');return;}
     if(op==='accept'||op==='reject')await updateAnnotations(state.review.annotations.map(a=>a.id===id?{...a,status:op==='accept'?'accepted':'rejected'}:a),op==='accept'?'Edit accepted. Preview the revision to see the result.':'Suggestion rejected.');
   }
   async function submit(event){
     if(event.target.id==='pdf-annotation-form'){
-      event.preventDefault();if(state.busy||!state.selection)return;const annotation={...state.selection,kind:find('#pdf-annotation-kind').value,after:find('#pdf-annotation-after').value,note:find('#pdf-annotation-note').value,status:'pending',source:'manual'};
+      event.preventDefault();if(state.busy||!state.selection||state.draftConflict)return;const annotation={...state.selection,kind:find('#pdf-annotation-kind').value,after:find('#pdf-annotation-after').value,note:find('#pdf-annotation-note').value,status:'pending',source:'manual'};
       if(annotation.kind==='note'&&!annotation.note.trim()){setMessage('Add a comment before saving this note.',true);return;}
       if(annotation.kind==='note')annotation.status='accepted';
-      const annotations=state.review.annotations.filter(a=>a.id!==state.editingId);if(state.editingId)annotation.id=state.editingId;else delete annotation.id;annotations.push(annotation);await updateAnnotations(annotations,'Annotation saved.');
+      const annotations=state.review.annotations.filter(a=>a.id!==state.editingId);if(state.editingId)annotation.id=state.editingId;else annotation.id='edit-'+(window.crypto?.randomUUID?.()||Date.now().toString(36)+'-'+Math.random().toString(36).slice(2));annotations.push(annotation);await updateAnnotations(annotations,'Annotation saved.');
     }else if(event.target.id==='pdf-save-revision'){event.preventDefault();await saveRevision();}
   }
   async function change(event){
     const target=event.target;
     if(target.id==='pdf-annotation-kind'){if(state.selection){state.selection.kind=target.value;markEditorDirty();}const replacement=find('#pdf-annotation-after');if(replacement)replacement.disabled=target.value==='note';}
     if(target.id==='pdf-review-page'){state.activePage=Number(target.value);find(`.pdf-page[data-page="${state.activePage}"]`)?.scrollIntoView({behavior:'smooth',block:'start'});}
-    if(target.id==='pdf-revision-confirm'){state.confirmed=target.checked;const button=find('#pdf-save-revision button[type="submit"]');if(button)button.disabled=state.busy||state.editorDirty||!state.confirmed||countChanges(state.review.annotations).pending||!countChanges(state.review.annotations).accepted||!state.previewBytes;}
+    if(target.id==='pdf-revision-confirm'){state.confirmed=target.checked;const button=find('#pdf-save-revision button[type="submit"]');if(button)button.disabled=state.busy||state.editorDirty||state.pendingSync||!state.confirmed||countChanges(state.review.annotations).pending||!countChanges(state.review.annotations).accepted||!state.previewBytes;}
     if(target.id==='pdf-revision-default')state.setDefault=target.checked;
   }
-  function markEditorDirty(){state.editorDirty=true;state.confirmed=false;const check=find('#pdf-revision-confirm');if(check)check.checked=false;const save=find('#pdf-save-revision button[type="submit"]');if(save)save.disabled=true;}
-  function requestClose(){if(state.editorDirty){state.closeRequested=true;renderSidebar();}else close();}
+  function markEditorDirty(){state.editorDirty=true;persistDraft();state.confirmed=false;const check=find('#pdf-revision-confirm');if(check)check.checked=false;const save=find('#pdf-save-revision button[type="submit"]');if(save)save.disabled=true;}
+  function requestClose(){if(state.editorDirty||state.pendingSync){state.closeRequested=true;renderSidebar();}else close();}
   function input(event){const target=event.target;if(state.selection&&['pdf-annotation-after','pdf-annotation-note'].includes(target.id)){state.selection[target.id==='pdf-annotation-after'?'after':'note']=target.value;markEditorDirty();}if(target.id==='pdf-revision-label'){state.label=target.value;state.confirmed=false;const check=find('#pdf-revision-confirm');if(check)check.checked=false;const button=find('#pdf-save-revision button[type="submit"]');if(button)button.disabled=true;}}
   async function open(options){
-    close();const generation=++state.generation;state.options=options;state.jobId=options.jobId||'';state.error='';state.notice='';state.selection=null;state.editingId=null;state.review=null;state.resume=null;state.library=null;state.document=null;state.pages=[];state.sourceLinks=[];state.scale=1;state.activePage=1;state.mode='original';state.previewBytes=null;state.confirmed=false;state.setDefault=false;state.busy=true;state.noteTool=false;state.rendering=false;state.editorDirty=false;state.closeRequested=false;
+    close();const generation=++state.generation;state.options=options;state.jobId=options.jobId||'';state.error='';state.notice='';state.selection=null;state.editingId=null;state.review=null;state.resume=null;state.library=null;state.document=null;state.pages=[];state.sourceLinks=[];state.scale=1;state.activePage=1;state.mode='original';state.previewBytes=null;state.confirmed=false;state.setDefault=false;state.busy=true;state.noteTool=false;state.rendering=false;state.editorDirty=false;state.closeRequested=false;state.errorCode='';state.draftBase=null;state.draftConflict='';state.draftCanRebase=false;state.draftStorageError=false;state.pendingSync=null;state.syncInFlight=false;state.remoteReview=null;
     const dialog=document.createElement('dialog');state.dialog=dialog;dialog.className='pdf-review-dialog';dialog.setAttribute('aria-labelledby','pdf-review-title');dialog.innerHTML=dialogShell();document.body.appendChild(dialog);dialog.addEventListener('click',event=>{click(event).catch(error=>{if(generation===state.generation)setMessage(error.message,true);});});dialog.addEventListener('submit',event=>{submit(event).catch(error=>{if(generation===state.generation)setMessage(error.message,true);});});dialog.addEventListener('change',event=>{change(event).catch(error=>{if(generation===state.generation)setMessage(error.message,true);});});dialog.addEventListener('input',input);dialog.addEventListener('mouseup',event=>{if(event.target.closest?.('.pdf-text-layer'))readSelection();});dialog.addEventListener('keyup',event=>{if(event.key==='Shift'&&event.target.closest?.('.pdf-review-pages'))readSelection();});dialog.addEventListener('cancel',event=>{event.preventDefault();requestClose();});dialog.showModal();renderToolbar();renderSidebar();
     try{
       const library=await request('/api/resumes');checkActive(generation);state.library=library;
@@ -243,13 +334,15 @@
       const loadedPdf=await pdfjs.getDocument(pdfOptions(state.pdfBytes.slice())).promise;if(generation!==state.generation){loadedPdf.destroy();return;}state.pdf=loadedPdf;const extracted=await extractDocument(state.pdf,generation);checkActive(generation);state.document=extracted.document;state.pages=extracted.pages;state.sourceLinks=extracted.links;
       state.scale=clamp(((find('.pdf-review-viewport')?.clientWidth||800)-60)/state.pages[0].viewport.width,.5,1.5);await renderPages();
       if(!state.document.text.trim())state.notice='This PDF has no selectable text. Add page comments, or upload a text-based PDF to edit and tailor its wording.';
-      await createReview();checkActive(generation);if(options.autoSuggest&&state.jobId&&!state.review.annotations.length&&state.document.text.trim()){state.busy=false;await suggestions('local');checkActive(generation);}
-    }catch(error){if(generation===state.generation){state.error=error.message;const loading=find('.pdf-review-loading');if(loading)loading.textContent='PDF review unavailable.';}}
+      await createReview();checkActive(generation);if(options.autoSuggest&&!state.editorDirty&&!state.pendingSync&&state.jobId&&!state.review.annotations.length&&state.document.text.trim()){state.busy=false;await suggestions('local');checkActive(generation);}
+    }catch(error){if(generation===state.generation){recordError(error);const loading=find('.pdf-review-loading');if(loading)loading.textContent='PDF review unavailable.';}}
     finally{if(generation===state.generation){state.busy=false;renderSidebar();renderToolbar();}}
   }
   function close(){
-    state.generation++;const dialog=state.dialog;state.dialog=null;if(dialog){dialog.close();dialog.remove();}Promise.resolve(state.pdf?.destroy?.()).catch(()=>{});Promise.resolve(state.previewPdf?.destroy?.()).catch(()=>{});state.pdf=null;state.previewPdf=null;state.pdfBytes=null;state.previewBytes=null;state.document=null;state.review=null;state.selection=null;state.options=null;
+    persistDraft();stopSync();state.generation++;const dialog=state.dialog;state.dialog=null;if(dialog){dialog.close();dialog.remove();}Promise.resolve(state.pdf?.destroy?.()).catch(()=>{});Promise.resolve(state.previewPdf?.destroy?.()).catch(()=>{});state.pdf=null;state.previewPdf=null;state.pdfBytes=null;state.previewBytes=null;state.document=null;state.review=null;state.selection=null;state.options=null;state.editorDirty=false;state.pendingSync=null;state.syncInFlight=false;
   }
+  window.addEventListener?.('pagehide',persistDraft);
+  window.addEventListener?.('beforeunload',event=>{if(state.editorDirty||state.pendingSync){persistDraft();event.preventDefault();event.returnValue='';}});
   window.JobflowPDFReview={open,close};
-  if(typeof module!=='undefined'&&module.exports)module.exports={applyEdits,countChanges,normalizedRects,wrapText,layoutParagraphs,exportLink,esc,_state:state,_renderSidebar:renderSidebar,_saveRevision:saveRevision,_suggestions:suggestions,_input:input,_change:change,_click:click};
+  if(typeof module!=='undefined'&&module.exports)module.exports={applyEdits,countChanges,normalizedRects,wrapText,layoutParagraphs,exportLink,esc,_state:state,_renderSidebar:renderSidebar,_saveRevision:saveRevision,_suggestions:suggestions,_input:input,_change:change,_click:click,_submit:submit,_request:request,_restoreDraft:restoreDraft,_persistDraft:persistDraft,_updateAnnotations:updateAnnotations,_syncPending:syncPending,_createReview:createReview};
 })();

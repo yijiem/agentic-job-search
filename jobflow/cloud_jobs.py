@@ -206,22 +206,39 @@ def run_item(accounts, queue, item):
         command.append('--due')
     environment = dict(os.environ)
     environment.pop('OPENAI_API_KEY', None)
+    started = time.monotonic()
+    outcome = 'error'
+    # The command is allowlisted above. Never log account IDs, paths, tokens,
+    # or captured CLI output: those can include private workspace material.
+    print('Jobflow background workflow started: command=%s' % item['command'], flush=True)
     try:
         result = subprocess.run(command, cwd=str(Path(__file__).resolve().parents[1]),
             env=environment, capture_output=True, text=True, timeout=WORKFLOW_TIMEOUT, check=False)
         if 'Another workflow process is running' in result.stderr:
+            outcome = 'busy'
             queue.finish(item, 'retry', 'Another workspace update is in progress; retrying shortly.')
         elif result.returncode:
+            outcome = 'process_error'
             queue.finish(item, 'retry', 'The workflow failed. Check the workspace configuration and source health.')
         elif item['command'] == 'due' and result.stdout.strip() == 'Not due; no changes.':
+            outcome = 'not_due'
             queue.finish(item, 'done', 'The next search follows your saved schedule.')
         elif item['command'] in ('rematch', 'refresh'):
+            outcome = 'done'
             queue.finish(item, 'done', 'Matches and preparation updated from your saved profile.')
         else:
             status, message = _report_outcome(root)
+            outcome = status
             queue.finish(item, status, message)
-    except (OSError, RemoteError, subprocess.TimeoutExpired, ValueError, TypeError, KeyError):
+    except subprocess.TimeoutExpired:
+        outcome = 'timeout'
         queue.finish(item, 'retry', 'The background workflow could not finish; retrying shortly.')
+    except (OSError, RemoteError, ValueError, TypeError, KeyError):
+        outcome = 'error'
+        queue.finish(item, 'retry', 'The background workflow could not finish; retrying shortly.')
+    finally:
+        print('Jobflow background workflow finished: command=%s outcome=%s elapsed_seconds=%.3f' %
+              (item['command'], outcome, max(0, time.monotonic() - started)), flush=True)
 
 
 def worker_loop(accounts, queue, stop, once=False):
