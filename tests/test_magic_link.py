@@ -1,17 +1,19 @@
 """Security boundaries for browser-bound Supabase email links; no live email."""
 import base64
 import hashlib
+import io
 import json
 import tempfile
 import threading
 import unittest
+import urllib.error
 from http.client import HTTPConnection
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from jobflow.cloud import CloudServer
-from jobflow.cloud_auth import AuthError, PendingSignIns, SupabaseEmailAuth
+from jobflow.cloud_auth import AuthError, AuthRateLimitError, PendingSignIns, SupabaseEmailAuth
 
 
 class PendingSignInTests(unittest.TestCase):
@@ -207,6 +209,29 @@ class MagicLinkHTTPTests(unittest.TestCase):
             self.assertNotIn('Domain=', value)
         self.assertEqual(self.auth.links[0][2], self.origin + '/auth/callback')
         self.assertNotIn(self.auth.links[0][1], json.dumps(known_body))
+
+    def test_provider_429_revokes_pending_link_and_throttles_unknown_addresses_equally(self):
+        self.server.auth = SupabaseEmailAuth('https://project.supabase.co', 'sb_publishable_test')
+        provider_error = urllib.error.HTTPError('https://project.supabase.co', 429,
+            'private email limit for owner@example.com', {},
+            io.BytesIO(b'{"secret":"private-provider-token","email":"owner@example.com"}'))
+        with patch('jobflow.cloud_auth.urllib.request.urlopen', side_effect=provider_error) as send:
+            known = self.request('POST', '/api/auth/start', {'email': 'owner@example.com', 'mode': 'link'})
+            with patch.object(self.server.accounts, 'lookup_email', side_effect=AssertionError('must not look up email')):
+                unknown = self.request('POST', '/api/auth/start', {'email': 'stranger@example.com', 'mode': 'link'})
+        send.assert_called_once()
+        for status, headers, body in (known, unknown):
+            self.assertEqual(status, 429)
+            self.assertEqual(body, {'error': AuthRateLimitError.message})
+            self.assertEqual(headers['Cache-Control'], 'no-store')
+            self.assertEqual(len(headers['cookies']), 1)
+            self.assertTrue(headers['cookies'][0].startswith('__Host-jobflow-pkce='))
+            self.assertIn('Max-Age=0', headers['cookies'][0])
+        self.assertEqual(known[1]['cookies'], unknown[1]['cookies'])
+        self.assertEqual(len(self.server.pending_signins.entries), 0)
+        self.assertEqual(self.server.accounts.lookup_email('owner@example.com')['status'], 'invited')
+        with self.server.accounts._connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0], 0)
 
     def test_callback_accepts_top_level_return_then_creates_strict_app_session(self):
         cookie, unused, unused = self.start()

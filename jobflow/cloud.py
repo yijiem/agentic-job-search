@@ -17,7 +17,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .cloud_accounts import Accounts
-from .cloud_auth import AuthError, PendingSignIns, RateLimiter, SupabaseEmailAuth
+from .cloud_auth import (AuthError, AuthRateLimitError, EmailSendCooldown,
+                         PendingSignIns, RateLimiter, SupabaseEmailAuth)
 from .cloud_jobs import WorkQueue, worker_loop
 from .onboarding import initialize_workspace, onboarding_state, save_onboarding, upload_resume
 from .remote import enabled as remote_enabled, RemoteError, RemoteBusyError
@@ -70,6 +71,7 @@ class CloudServer(ThreadingHTTPServer):
         self.accounts = Accounts(self.root)
         self.queue = WorkQueue(self.root)
         self.auth = auth if auth is not None else SupabaseEmailAuth()
+        self.email_send_cooldown = EmailSendCooldown()
         self.asset_directory = Path(asset_directory).resolve()
         self.sources = source_template(self.root)
         self.limiter = RateLimiter()
@@ -354,6 +356,9 @@ class CloudHandler(JobflowHandler):
         email = email.strip().casefold()
         identity = hashlib.sha256(email.encode()).hexdigest()
         verify = path == '/api/auth/verify'
+        if not verify:
+            # Apply an observed provider limit equally before invitation lookup.
+            self.server.email_send_cooldown.check()
         if (not self.server.limiter.allow('auth-global', 1000, 900) or
                 not self.server.limiter.allow(('verify:' if verify else 'start:') + identity,
                                                10 if verify else 5, 900)):
@@ -369,14 +374,20 @@ class CloudHandler(JobflowHandler):
                 if allowed:
                     try:
                         self.server.auth.start_link(email, verifier, self.server.origin + '/auth/callback')
-                    except AuthError:
+                    except AuthError as error:
+                        if isinstance(error, AuthRateLimitError):
+                            self.server.email_send_cooldown.defer()
                         self.server.pending_signins.revoke(pending)
                         self._set_pending_cookie('', expire=True)
                         raise
                 self._respond(200, {'message': 'If this email has an invitation, a sign-in email is on its way.'})
                 return
             if allowed:
-                self.server.auth.start(email)
+                try:
+                    self.server.auth.start(email)
+                except AuthRateLimitError:
+                    self.server.email_send_cooldown.defer()
+                    raise
             self._respond(200, {'message': 'If this email has an invitation, a sign-in code is on its way.'})
             return
         if not allowed:
@@ -498,6 +509,12 @@ class CloudHandler(JobflowHandler):
             self._respond(409, {'error': 'Another workspace update is running. Please retry shortly.'})
         except RemoteError:
             self._respond(503, {'error': 'Your private workspace could not save this change. Please retry shortly.'})
+        except AuthRateLimitError:
+            if path == '/api/auth/start':
+                # Keep the response cookie shape independent of invitation status.
+                self.response_cookies = []
+                self._set_pending_cookie('', expire=True)
+            self._respond(429, {'error': AuthRateLimitError.message})
         except AuthError:
             self._respond(401, {'error': 'Sign-in could not be completed. Request a fresh sign-in email and try again.'})
         except (WebError, ValueError, KeyError, TypeError) as error:

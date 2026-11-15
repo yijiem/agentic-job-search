@@ -32,7 +32,9 @@ Enable Data API access to the `public` RPC schema, disable automatic exposure of
 
 Create a private Storage bucket named `jobflow-private` through the Storage API/dashboard, with the Free plan's 50 MB per-object limit. The application compresses large textual artifacts before upload.
 
-Enable confirmed email sign-in. Keep the default magic-link templates. The owner pilot can use the email belonging to the Supabase organization; configure custom SMTP before inviting other addresses. After Render provides the app URL, set it as the Auth Site URL and allow exactly `https://YOUR-HOST/auth/callback` as a redirect. Open the email link in the same browser that requested it.
+Enable confirmed email sign-in. Keep the default magic-link templates. Supabase's built-in SMTP sends only to addresses belonging to the project's organization team. Its current limit is two messages per hour across the project; magic links and optional email codes share that quota. A rate-limit response means to wait before requesting another email; the app does not promise an exact reset time. Configure custom SMTP for production or additional users. See [Supabase email delivery restrictions](https://supabase.com/docs/guides/auth/auth-smtp).
+
+After Render provides the app URL, set it as the Auth Site URL and allow exactly `https://YOUR-HOST/auth/callback` as a redirect. Open the email link in the same browser that requested it.
 
 ## Deploy source
 

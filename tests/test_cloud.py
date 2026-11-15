@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from jobflow.cloud import CloudServer, validate_origin
-from jobflow.cloud_auth import AuthError, RateLimiter, SupabaseEmailAuth
+from jobflow.cloud_auth import (AuthError, AuthRateLimitError, EmailSendCooldown,
+                               RateLimiter, SupabaseEmailAuth)
 from jobflow.onboarding import initialize_workspace, save_onboarding
 from jobflow.storage import Store
 
@@ -292,6 +293,22 @@ class CloudHTTPTests(unittest.TestCase):
         self.assertEqual(len(self.server.accounts.list_accounts()), 1)
         self.assertEqual(self.server.accounts.list_accounts()[0]['status'], 'invited')
 
+    def test_code_send_limit_is_429_without_blocking_existing_code_verification(self):
+        self.server.accounts.invite('owner@example.com')
+        with patch.object(self.auth, 'start', side_effect=AuthRateLimitError()) as send:
+            known = self.request('POST', '/api/auth/start', {'email': 'owner@example.com'})
+            unknown = self.request('POST', '/api/auth/start', {'email': 'unknown@example.com'})
+        send.assert_called_once_with('owner@example.com')
+        for status, headers, body in (known, unknown):
+            self.assertEqual(status, 429)
+            self.assertEqual(body, {'error': AuthRateLimitError.message})
+            self.assertNotIn('__Host-jobflow=', headers.get('Set-Cookie', ''))
+        self.assertEqual(known[1]['Set-Cookie'], unknown[1]['Set-Cookie'])
+        self.assertEqual(self.server.accounts.lookup_email('owner@example.com')['status'], 'invited')
+        # A message already received still works; the send quota is independent.
+        self.assertEqual(self.request('POST', '/api/auth/verify',
+                         {'email': 'owner@example.com', 'token': '123456'})[0], 200)
+
     def test_cookie_flags_csrf_rotation_and_logout_invalidate_session(self):
         self.server.accounts.invite('owner@example.com')
         status, headers, body = self.request('POST', '/api/auth/verify', {'email': 'owner@example.com', 'token': '123456'})
@@ -447,11 +464,41 @@ class CloudAuthTests(unittest.TestCase):
             with self.assertRaises(AuthError) as caught:
                 auth.start('owner@example.com')
         self.assertNotIn('private', str(caught.exception))
+        self.assertIs(type(caught.exception), AuthError)
         with patch('jobflow.cloud_auth.urllib.request.urlopen', return_value=io.BytesIO(b'{"ok":true}')) as request:
             auth.start('owner@example.com')
             sent = request.call_args.args[0]
             self.assertEqual(json.loads(sent.data), {'email': 'owner@example.com', 'create_user': True})
             self.assertEqual(sent.get_header('Apikey'), 'publishable-test')
+
+    def test_provider_429_is_sanitized_and_remains_an_auth_error_without_retrying(self):
+        auth = SupabaseEmailAuth('https://project.supabase.co', 'publishable-test')
+        for method in (lambda: auth.start('owner@example.com'),
+                       lambda: auth.start_link('owner@example.com', 'v' * 64, 'https://jobs.example.test/auth/callback'),
+                       lambda: auth.verify('owner@example.com', '123456')):
+            provider_body = io.BytesIO(b'{"email":"owner@example.com","secret":"private-provider-token"}')
+            error = urllib.error.HTTPError('https://project.supabase.co', 429,
+                                          'owner@example.com private-provider-token', {}, provider_body)
+            with patch('jobflow.cloud_auth.urllib.request.urlopen', side_effect=error) as request:
+                with self.assertRaises(AuthError) as caught:
+                    method()
+            self.assertIsInstance(caught.exception, AuthRateLimitError)
+            self.assertEqual(str(caught.exception), AuthRateLimitError.message)
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertTrue(caught.exception.__suppress_context__)
+            self.assertEqual(provider_body.tell(), 0)
+            request.assert_called_once()
+
+    def test_email_cooldown_expires_and_checks_do_not_extend_it(self):
+        cooldown = EmailSendCooldown()
+        with patch('jobflow.cloud_auth.time.monotonic', return_value=100):
+            cooldown.check()
+            cooldown.defer()
+        with patch('jobflow.cloud_auth.time.monotonic', return_value=159):
+            with self.assertRaises(AuthRateLimitError):
+                cooldown.check()
+        with patch('jobflow.cloud_auth.time.monotonic', return_value=160):
+            cooldown.check()
 
     def test_hosted_configuration_requires_https_and_public_provider_key(self):
         self.assertEqual(validate_origin('https://jobs.example.test/', '0.0.0.0'), 'https://jobs.example.test')

@@ -21,6 +21,31 @@ class AuthError(ValueError):
     pass
 
 
+class AuthRateLimitError(AuthError):
+    message = ('Please wait before requesting another sign-in email. '
+               'The email provider has temporarily limited requests.')
+
+    def __init__(self):
+        super().__init__(self.message)
+
+
+class EmailSendCooldown:
+    """Brief process-wide backoff after a provider limit, independent of email."""
+    def __init__(self):
+        self.until = 0
+        self.lock = threading.Lock()
+
+    def check(self):
+        with self.lock:
+            if time.monotonic() < self.until:
+                raise AuthRateLimitError()
+
+    def defer(self):
+        with self.lock:
+            # This suppresses immediate retries, not an estimate of quota reset.
+            self.until = time.monotonic() + 60
+
+
 class SupabaseEmailAuth:
     def __init__(self, url=None, key=None):
         self.url = (url or os.environ.get('SUPABASE_URL', '')).rstrip('/')
@@ -46,7 +71,9 @@ class SupabaseEmailAuth:
                 if len(raw) > 1024 * 1024:
                     raise AuthError('The sign-in provider returned an invalid response.')
                 value = json.loads(raw)
-        except urllib.error.HTTPError:
+        except urllib.error.HTTPError as error:
+            if error.code == 429:
+                raise AuthRateLimitError() from None
             raise AuthError('Sign-in could not be completed. Request a fresh code and try again.') from None
         except (OSError, ValueError):
             raise AuthError('The sign-in provider is unavailable. Please try again shortly.') from None
