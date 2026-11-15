@@ -102,6 +102,22 @@ class CodexBatchTests(unittest.TestCase):
             'observed_company': 'Coinbase', 'observed_title': 'Senior Software Engineer',
             'observed_role_id': '8304034', **changes})
 
+    def nuro(self):
+        self.listing_url = 'https://nuro.ai/careersitem?gh_jid=8011527'
+        self.destination_url = 'https://www.nuro.ai/careersitem?gh_jid=8011527'
+        batch = self.store.get(BATCH_KIND, self.batch['id'])
+        job = self.store.get('jobs', 'job-1')
+        job.update(company='Nuro', title='Senior Software Engineer, Observability', url=self.listing_url)
+        self.store.put('jobs', 'job-1', job)
+        batch['items'][0].update({key: job[key] for key in ('company', 'title', 'url')})
+        self.store.put(BATCH_KIND, batch['id'], batch)
+        self.prepare()
+        self.context()
+
+    def bind_nuro_destination(self, **changes):
+        return self.bind_destination(**{'observed_company': 'Nuro',
+            'observed_title': 'Senior Software Engineer, Observability', 'observed_role_id': '8011527', **changes})
+
     def inspect_destination(self, task=None):
         task = task or self.claim()
         return self.report(task, 'inspected', observed_url=self.destination_url,
@@ -626,6 +642,127 @@ class CodexBatchTests(unittest.TestCase):
         self.store.put(BATCH_KIND, raw['id'], raw)
         with self.assertRaisesRegex(ValueError, 'not a supported exact role mapping'):
             self.bind_destination(observed_company='Different employer')
+
+    def test_nuro_binding_preserves_answers_resume_and_history_then_requires_fresh_checkpoints(self):
+        self.nuro()
+        self.codex('codex_answers', job_id='job-1', answers={'Sponsorship': 'No', 'Hybrid': 'Yes'})
+        reviewed = self.inspect()['batch']
+        self.codex('codex_authorize', revision=reviewed['revision'], job_ids=['job-1'], confirmed=True)
+        before = self.store.get(BATCH_KIND, self.batch['id'])
+        saved = before['codex_run']['materials']['job-1']
+        bound = self.bind_nuro_destination()['batch']['items'][0]
+        after = self.store.get(BATCH_KIND, self.batch['id'])
+        self.assertEqual(bound['url'], self.listing_url)
+        self.assertEqual(bound['application_url'], self.destination_url)
+        self.assertEqual(bound['status'], 'pending')
+        for key in ('authorization', 'fields', 'form_signature', 'planned_answers', 'attempt_id'):
+            self.assertNotIn(key, bound)
+        for key in ('answers', 'resume_id', 'resume_override', 'codex_review_history'):
+            self.assertEqual(after['items'][0][key], before['items'][0][key])
+        self.assertEqual(after['answers'], before['answers'])
+        self.assertEqual(after['applicant'], before['applicant'])
+        self.assertEqual(after['codex_run']['id'], before['codex_run']['id'])
+        self.assertEqual(after['codex_run']['worker_id'], before['codex_run']['worker_id'])
+        material = after['codex_run']['materials']['job-1']
+        self.assertEqual({key: value for key, value in material.items()
+                          if key not in ('application_url', 'destination_binding')}, saved)
+        self.assertEqual(material['destination_binding'], bound['destination_binding'])
+        self.assertEqual(after['items'][0]['destination_binding_history'], [bound['destination_binding']])
+        self.assertTrue(bound['destination_binding']['observed_at'])
+        with self.assertRaisesRegex(ValueError, 'inspected, ready form'):
+            self.codex('codex_authorize', revision=self.current()['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        self.assertEqual(task['mode'], 'inspect')
+        self.assertEqual(task['answers'], {'Work authorization': 'Yes', 'Sponsorship': 'No', 'Hybrid': 'Yes'})
+        self.assertEqual(Path(task['resume_path']).read_bytes(), self.content)
+        self.assertEqual(task['application_url'], self.destination_url)
+        with self.assertRaisesRegex(ValueError, 'different application'):
+            self.inspect(task)
+        ready = self.inspect_destination(task)
+        self.codex('codex_authorize', revision=ready['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        self.assertTrue(self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'])['can_fill'])
+        self.report(task, 'submitting', form_signature=task['form_signature'])
+        self.assertTrue(self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'], phase='before_click')['can_click'])
+        for wrong in (self.listing_url, self.destination_url.replace('8011527', '999'),
+                      self.destination_url.replace('/careersitem?', '/careersitem/confirmation?'),
+                      'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=nuro&token=8011527'):
+            with self.subTest(wrong=wrong), self.assertRaises(ValueError):
+                self.report(task, 'submitted', evidence={'url': wrong, 'text': 'Received.'})
+        result = self.report(task, 'submitted', evidence={'url': self.destination_url, 'text': 'Application received.'})
+        self.assertEqual(result['batch']['codex_run']['status'], 'complete')
+        self.assertEqual(result['batch']['items'][0]['submitted_materials']['application_url'], self.destination_url)
+        self.assertEqual(len(self.store.get('applications', 'job-1')['browser_submissions']), 1)
+
+    def test_nuro_binding_rejects_unsafe_destinations_and_observations_without_changes(self):
+        self.nuro()
+        invalid_urls = [self.listing_url, self.destination_url.replace('8011527', '999'),
+            self.destination_url.replace('https:', 'http:'),
+            self.destination_url.replace('www.nuro.ai', 'www.nuro.ai:443'),
+            self.destination_url.replace('www.nuro.ai', 'www.nuro.ai:8443'),
+            self.destination_url.replace('www.nuro.ai', 'other.example.com'),
+            self.destination_url.replace('www.nuro.ai', 'www.nuro.ai.evil.example.com'),
+            self.destination_url.replace('/careersitem?', '/careersitem/?'),
+            self.destination_url.replace('/careersitem?', '/other?'),
+            self.destination_url + '&gh_jid=8011527', self.destination_url + '&extra=',
+            self.destination_url + '#apply', self.destination_url + '#',
+            self.destination_url.replace('gh_jid=', '%67h_jid='),
+            self.destination_url.replace('8011527', 'eight'),
+            'https://job-boards.greenhouse.io/embed/job_app?token=8011527&for=nuro&gh_jid=8011527']
+        invalid = [{'destination_url': url, 'observed_href': url} for url in invalid_urls]
+        invalid += [{'observed_href': url} for url in invalid_urls]
+        invalid += [{'observed_company': 'Other'}, {'observed_company': 'Coinbase'},
+            {'observed_title': 'Other role'}, {'observed_role_id': '999'}, {'observed_role_id': 'eight'},
+            {'listing_url': self.destination_url}]
+        before = self.current()
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                self.bind_nuro_destination(**payload)
+            self.assertEqual(self.current(), before)
+
+    def test_nuro_binding_is_not_general_apex_or_listing_url_normalization(self):
+        self.nuro()
+        invalid = [self.listing_url.replace('https:', 'http:'),
+            self.listing_url.replace('nuro.ai', 'nuro.ai:443'),
+            self.listing_url.replace('nuro.ai', 'nuro.ai:8443'),
+            self.listing_url.replace('nuro.ai', 'other.example.com'), self.destination_url,
+            self.listing_url.replace('/careersitem?', '/careersitem/?'),
+            self.listing_url + '&gh_jid=8011527', self.listing_url + '&extra=',
+            self.listing_url + '#apply', self.listing_url + '#',
+            self.listing_url.replace('gh_jid=', '%67h_jid=')]
+        for listing in invalid:
+            job = self.store.get('jobs', 'job-1')
+            job['url'] = listing
+            self.store.put('jobs', 'job-1', job)
+            raw = self.store.get(BATCH_KIND, self.batch['id'])
+            raw['items'][0]['url'] = listing
+            raw['codex_run']['materials']['job-1']['url'] = listing
+            self.store.put(BATCH_KIND, raw['id'], raw)
+            before = self.current()
+            with self.subTest(listing=listing), self.assertRaises(ValueError):
+                self.bind_nuro_destination(listing_url=listing)
+            self.assertEqual(self.current(), before)
+
+    def test_nuro_binding_rejects_foreign_stale_and_unsafe_states(self):
+        self.nuro()
+        for payload in ({'worker_id': 'foreign'}, {'workspace_id': 'wrong'}, {'revision': -1}, {'job_id': 'job-2'}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                self.bind_nuro_destination(**payload)
+        initial = self.store.get(BATCH_KIND, self.batch['id'])
+        variants = [('status', status) for status in ('paused', 'cancelled', 'complete')]
+        variants += [('item_status', status) for status in ('inspecting', 'running', 'submitting', 'uncertain', 'submitted', 'skipped')]
+        variants += [('codex_click_granted_at', '2026-11-15T20:00:00+00:00'), ('submission_materials', {'resume_id': self.resume['id']})]
+        for key, value in variants:
+            raw = json.loads(json.dumps(initial))
+            if key == 'status':
+                raw['status'] = value
+            else:
+                raw['items'][0]['status' if key == 'item_status' else key] = value
+            self.store.put(BATCH_KIND, raw['id'], raw)
+            before = self.store.get(BATCH_KIND, raw['id'])
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.bind_nuro_destination()
+            self.assertEqual(self.store.get(BATCH_KIND, raw['id']), before)
 
 
 if __name__ == '__main__':

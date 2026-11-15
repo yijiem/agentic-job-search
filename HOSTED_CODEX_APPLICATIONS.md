@@ -81,8 +81,20 @@ with `needs_input`. Send `codex_bind_destination` with current `revision`, `job_
 `listing_url`, `observed_href`, `destination_url`, `observed_company:"Coinbase"`,
 `observed_title` (the selected title), and `observed_role_id` (the numeric ID as
 text). Claim a fresh inspection and use its returned `application_url`.
+
+Nuro's canonical-host redirect is also supported, only from
+`https://nuro.ai/careersitem?gh_jid=ID` to
+`https://www.nuro.ai/careersitem?gh_jid=ID` with the same numeric role ID and no
+other query parameters or fragments. Navigate to the selected listing and verify
+the actual redirected URL, Nuro employer, and selected title. Finish any active
+inspection with `needs_input`, then send the same `codex_bind_destination`
+operation with `observed_company:"Nuro"`; for this redirect, `observed_href` is
+the actual landed URL, identical to `destination_url`. This preserves the listing,
+saved answers, resume, and history while requiring fresh inspection and
+authorization. It does not allow arbitrary host aliases or another ATS host.
 Other redirects remain `needs_input`; never invent an observed URL.
-Confirmation may use that bound URL or the exact receipt route
+Nuro confirmation evidence must match its bound URL exactly. For Coinbase,
+confirmation may use its bound URL or the exact receipt route
 `https://job-boards.greenhouse.io/embed/job_app/confirmation?for=coinbase&token=ID`
 with the same role ID and no extra query parameters. This does not authorize
 another role, form, or host. Other receipt destinations require uncertainty.

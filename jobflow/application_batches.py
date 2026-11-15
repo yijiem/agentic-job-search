@@ -1200,7 +1200,7 @@ def _codex_confirmation_url(value, item):
 
 
 def _codex_bind_destination(root, store, batch, run, payload):
-    """Bind one browser-observed, role-preserving employer-to-ATS link."""
+    """Bind one explicitly supported, browser-observed application destination."""
     _batch(store, {**payload, 'batch_id': batch['id']}, revision=True)
     item = _item(batch, payload.get('job_id'))
     if item.get('codex_run_id') != run['id'] or item['job_id'] not in run['job_ids']:
@@ -1225,12 +1225,18 @@ def _codex_bind_destination(root, store, batch, run, payload):
         raise ValueError('Observed employer and role must match the reserved listing exactly.')
     original, target = urlsplit(listing), urlsplit(destination)
     match = re.fullmatch(r'/careers/positions/([0-9]+)', original.path)
-    if (company != 'Coinbase' or original.netloc != 'www.coinbase.com' or not match or
-            original.fragment or role_id != match.group(1) or
-            parse_qs(original.query, keep_blank_values=True) != {'gh_jid': [role_id]} or
-            target.netloc != 'job-boards.greenhouse.io' or target.path != '/embed/job_app' or target.fragment or
-            parse_qs(target.query, keep_blank_values=True) != {'token': [role_id], 'for': ['coinbase'], 'gh_jid': [role_id]}):
-        raise ValueError('This employer-to-ATS destination is not a supported exact role mapping.')
+    coinbase = (company == 'Coinbase' and original.netloc == 'www.coinbase.com' and match and
+        not original.fragment and role_id == match.group(1) and
+        parse_qs(original.query, keep_blank_values=True) == {'gh_jid': [role_id]} and
+        target.netloc == 'job-boards.greenhouse.io' and target.path == '/embed/job_app' and not target.fragment and
+        parse_qs(target.query, keep_blank_values=True) == {'token': [role_id], 'for': ['coinbase'], 'gh_jid': [role_id]})
+    # Nuro redirects its apex listing to this exact www URL. This is a single
+    # employer mapping, never a general permission to normalize other hosts.
+    nuro = (company == 'Nuro' and re.fullmatch(r'[0-9]+', role_id) and
+        listing == 'https://nuro.ai/careersitem?gh_jid=' + role_id and
+        destination == 'https://www.nuro.ai/careersitem?gh_jid=' + role_id and href == destination)
+    if not (coinbase or nuro):
+        raise ValueError('This employer application destination is not a supported exact role mapping.')
     _codex_observation_url(href, destination, exact=True)
     if urlsplit(href).fragment:
         raise ValueError('Record the exact observed application link without a fragment.')

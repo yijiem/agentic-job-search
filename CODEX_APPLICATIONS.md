@@ -142,10 +142,11 @@ attempt, use `codex_answers` with `answers: {}` when no answers need changing.
 
 If the employer's actual Apply link opens a different application host, record
 the real destination; never report the listing URL as the form's observed URL.
-The CLI currently supports only Coinbase's exact role-preserving link from
+The CLI supports Coinbase's exact role-preserving link from
 `https://www.coinbase.com/careers/positions/ID?gh_jid=ID` to
 `https://job-boards.greenhouse.io/embed/job_app?token=ID&for=coinbase&gh_jid=ID`.
-Other redirects remain a `needs_input` blocker.
+It also supports Nuro's exact canonical-host redirect described below. Other
+redirects remain a `needs_input` blocker.
 
 After observing the link and verifying the employer, title, and matching numeric
 role ID on both pages, finish any active inspection with a `needs_input` report.
@@ -183,6 +184,19 @@ confirmation moves elsewhere, retain the actual evidence and report `uncertain`
 rather than inventing a matching URL.
 Binding cannot change paused, busy, completed, or uncertain applications and
 does not permit retrying a submission or bypassing consent or duplicate checks.
+
+For Nuro, the only supported redirect is
+`https://nuro.ai/careersitem?gh_jid=ID` to
+`https://www.nuro.ai/careersitem?gh_jid=ID`, with the same numeric ID and no extra
+query parameters or fragments. Navigate to the selected listing and verify the
+actual redirected URL, employer, and selected title. Finish any active inspection
+with `needs_input`, then use `codex_bind_destination` with
+`observed_company:"Nuro"`, the original `listing_url`, and the actual landed URL as both
+`observed_href` and `destination_url`. Retain the numeric `observed_role_id` and
+exact `observed_title`. The same ownership, revision, review invalidation, and
+one-click safeguards apply; saved answers and resume selections are preserved.
+Nuro confirmation evidence must match the bound URL exactly; this does not add
+an external receipt exception or permit arbitrary host aliases.
 
 ### Authorize, fill, and click once
 
