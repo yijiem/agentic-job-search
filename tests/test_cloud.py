@@ -282,6 +282,7 @@ class CloudHTTPTests(unittest.TestCase):
             self.assertEqual(body['code'], 'workspace_busy')
             self.assertIs(body['retryable'], True)
             action.assert_not_called()
+            self.assertEqual(context.call_args.kwargs, {'seconds': 90})
         with patch('jobflow.cloud.perform_action', side_effect=RemoteBusyError('Lease lost after a write')) as action:
             status, unused, body = self.request('POST', '/api/action', payload, cookie=cookie, csrf=csrf)
             self.assertEqual(status, 409)

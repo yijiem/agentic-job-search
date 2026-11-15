@@ -22,7 +22,7 @@ from .cloud_jobs import WorkQueue, worker_loop
 from .onboarding import (initialize_workspace, onboarding_complete, onboarding_state,
                          save_onboarding, upload_resume)
 from .remote import enabled as remote_enabled, RemoteError, RemoteBusyError
-from .remote_interactive import execution_context
+from .remote_interactive import INTERACTIVE_LEASE_SECONDS, execution_context
 from .remote_files import file_read_cache, hydrate_workspace
 from .web import (ASSET_DIRECTORY, STATIC_ASSETS, MAX_REQUEST_BYTES, MAX_UPLOAD_REQUEST_BYTES,
                   JobflowHandler, WebError, app_build, browser_worker_archive, job_detail,
@@ -241,7 +241,7 @@ class CloudHandler(JobflowHandler):
         if not lock.acquire(blocking=False):
             raise WebError('Another workspace update is running. Read the run again before continuing.', 409)
         try:
-            with execution_context(root):
+            with execution_context(root, seconds=INTERACTIVE_LEASE_SECONDS):
                 hydrate_workspace(root)
                 request = {'op': 'codex_hosted_resume' if resume_id is not None else 'codex_hosted_execute',
                            'account_id': account['id'], 'token': token}
@@ -483,7 +483,7 @@ class CloudHandler(JobflowHandler):
     def _complete_signin(self, identity):
         account = self.server.accounts.authenticate_identity(identity['id'], identity['email'])
         root = self._root(account)
-        with execution_context(root):
+        with execution_context(root, seconds=INTERACTIVE_LEASE_SECONDS):
             hydrate_workspace(root)
             initialize_workspace(root, sources=self.server.sources)
             from .reports import atomic_write
@@ -563,7 +563,7 @@ class CloudHandler(JobflowHandler):
             if not lock.acquire(blocking=False):
                 raise WorkspaceBusyError()
             try:
-                with execution_context(root):
+                with execution_context(root, seconds=INTERACTIVE_LEASE_SECONDS):
                     acquiring_workspace = False
                     hydrate_workspace(root)
                     if path == '/api/onboarding':

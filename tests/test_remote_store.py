@@ -1,3 +1,4 @@
+import contextvars
 import gzip
 import io
 import json
@@ -200,6 +201,58 @@ class RemoteTests(unittest.TestCase):
             with self.assertRaises(remote.RemoteBusyError):
                 with remote.RemoteLease(self.root, client=self.client):
                     pass
+
+    def test_short_web_lease_stays_short_in_nested_and_child_commands(self):
+        from jobflow.remote_interactive import INTERACTIVE_LEASE_SECONDS, execution_context
+        before = dict(os.environ)
+        with patch('jobflow.remote.client_from_env', return_value=self.client):
+            with execution_context(self.root, seconds=INTERACTIVE_LEASE_SECONDS) as outer:
+                self.assertEqual(outer.seconds, 90)
+                with remote.RemoteLease(self.root, client=self.client) as nested:
+                    self.assertEqual(nested.seconds, 90)
+                    child_environment = remote.lease_environment(self.root)
+                self.assertEqual(child_environment['JOBFLOW_LEASE_SECONDS'], '90')
+                self.assertEqual(before, dict(os.environ))
+
+                def child_command():
+                    # A fresh Context models a subprocess: it has the exported
+                    # environment but does not inherit the parent's ContextVar.
+                    with execution_context(self.root) as child:
+                        self.assertEqual(child.token, outer.token)
+                        self.assertEqual(child.seconds, 90)
+                        self.assertIsNone(child._thread)
+                        self.assertEqual(remote.lease_environment(self.root)['JOBFLOW_LEASE_SECONDS'], '90')
+
+                with patch.dict(os.environ, child_environment, clear=True):
+                    contextvars.Context().run(child_command)
+                self.assertEqual(self.client.token, outer.token)
+                outer._request('renew')
+        lease_calls = [p for name, p in self.client.calls if name == 'jobflow_workspace_lease']
+        self.assertEqual([p['p_action'] for p in lease_calls], ['acquire', 'renew', 'renew', 'release'])
+        self.assertTrue(all(p['p_seconds'] == 90 for p in lease_calls))
+
+    def test_worker_leases_keep_their_long_duration(self):
+        from jobflow.remote_interactive import execution_context
+        # A different workspace's inherited duration must not affect this one.
+        with patch.dict(os.environ, {'JOBFLOW_LEASE_WORKSPACE_ID': str(uuid.uuid4()),
+                                     'JOBFLOW_LEASE_TOKEN': 'x' * 43, 'JOBFLOW_LEASE_SECONDS': '90'}), \
+                patch('jobflow.remote.client_from_env', return_value=self.client):
+            with execution_context(self.root) as lease:
+                self.assertEqual(lease.seconds, 1900)
+                self.assertEqual(remote.lease_environment(self.root)['JOBFLOW_LEASE_SECONDS'], '1900')
+        self.assertTrue(all(p['p_seconds'] == 1900 for name, p in self.client.calls
+                            if name == 'jobflow_workspace_lease'))
+
+    def test_invalid_inherited_lease_duration_fails_before_renewal(self):
+        self.client.token = 'x' * 43
+        for seconds in ('', '0', '29', '3601', 'nan', '-90', '90.0'):
+            with self.subTest(seconds=seconds), patch.dict(os.environ, {
+                    'JOBFLOW_LEASE_WORKSPACE_ID': self.workspace,
+                    'JOBFLOW_LEASE_TOKEN': self.client.token, 'JOBFLOW_LEASE_SECONDS': seconds}):
+                with self.assertRaisesRegex(remote.RemoteError, 'duration is invalid'):
+                    with remote.RemoteLease(self.root, client=self.client):
+                        self.fail('An invalid duration renewed the lease')
+        self.assertEqual(self.client.calls, [])
 
     def test_busy_and_lost_leases_fail_closed(self):
         self.client.lease_available = False

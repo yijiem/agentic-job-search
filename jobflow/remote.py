@@ -232,9 +232,21 @@ def token_for(root):
 
 def lease_environment(root):
     result = dict(os.environ)
-    result['JOBFLOW_LEASE_WORKSPACE_ID'] = workspace_id(root, required=True)
+    identifier = workspace_id(root, required=True)
+    result['JOBFLOW_LEASE_WORKSPACE_ID'] = identifier
     result['JOBFLOW_LEASE_TOKEN'] = token_for(root)
+    lease = _leases.get().get(identifier)
+    result['JOBFLOW_LEASE_SECONDS'] = str(lease.seconds if lease is not None else _inherited_lease_seconds(1900))
     return result
+
+
+def _inherited_lease_seconds(default):
+    value = os.environ.get('JOBFLOW_LEASE_SECONDS')
+    if value is None:
+        return default  # Compatibility with a worker started by an older parent.
+    if not re.fullmatch(r'[0-9]{2,4}', value) or not 30 <= int(value) <= 3600:
+        raise RemoteError('The inherited workspace lease duration is invalid.')
+    return int(value)
 
 
 class RemoteLease:
@@ -263,11 +275,16 @@ class RemoteLease:
             existing.check()
             self._parent = existing
             self.token = existing.token
+            self.seconds = existing.seconds
         elif os.environ.get('JOBFLOW_LEASE_WORKSPACE_ID') == self.workspace:
             candidate = os.environ.get('JOBFLOW_LEASE_TOKEN', '')
             if not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', candidate):
                 raise RemoteError('The inherited workspace lease is invalid.')
             self.token = candidate
+            # A short web lease must stay short in its CLI subprocess. Only the
+            # owning web process renews continuously; if deployment kills it,
+            # any surviving child loses write access when this lease expires.
+            self.seconds = _inherited_lease_seconds(self.seconds)
             if not self._request('renew'):
                 raise RemoteBusyError('The inherited workspace lease has expired.')
         else:

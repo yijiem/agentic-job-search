@@ -1,6 +1,8 @@
 """Bound interactive work to small projections; full exports run in the worker."""
 from contextlib import nullcontext
 
+INTERACTIVE_LEASE_SECONDS = 90
+
 
 class InteractiveStore:
     def __init__(self, store):
@@ -30,6 +32,8 @@ class InteractiveStore:
         return self.store.put_groups(groups)
 
 
-def execution_context(root):
+def execution_context(root, seconds=None):
     from .remote import workspace_id, RemoteLease
-    return RemoteLease(root) if workspace_id(root) else nullcontext()
+    if not workspace_id(root):
+        return nullcontext()
+    return RemoteLease(root) if seconds is None else RemoteLease(root, seconds=seconds)
