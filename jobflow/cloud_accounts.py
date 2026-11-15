@@ -140,6 +140,10 @@ class Accounts:
         with self._connect() as db:
             return [_account(row) for row in db.execute('SELECT * FROM accounts ORDER BY created_at,id')]
 
+    def get_account(self, account_id):
+        with self._connect() as db:
+            return _account(db.execute('SELECT * FROM accounts WHERE id=?', (account_id,)).fetchone())
+
     def authenticate_identity(self, user_id, email):
         """Bind an existing invite to a provider-verified, email-confirmed identity.
 

@@ -64,7 +64,23 @@ The web service also needs `SUPABASE_PUBLISHABLE_KEY`. Its origin defaults to Re
 - Web health: `/healthz` (no account data)
 - Build: `JOBFLOW_BACKEND=local python3 -m unittest discover -s tests -q`
 
-No paid model credentials are supplied. Hosted workers use public feeds and deterministic preparation. Desktop Codex application execution and external OAuth integrations remain separate features.
+No paid model credentials are supplied. Hosted workers use public feeds and deterministic preparation. **Open in Codex** prepares a scoped desktop request from a hosted batch; the user presses Send to begin. See [the hosted runner workflow](HOSTED_CODEX_APPLICATIONS.md).
+
+Hosted Codex access uses the existing batch records, so this feature requires no
+new tables, migrations, environment keys, or public Storage policies. The backend
+issues a random 12-hour capability after session and CSRF validation, stores only
+its hash, and binds it to the account, workspace, current run, selected roles, and
+reserved resume hashes. It is checked again inside the normal CLI lock/remote
+lease for every operation. Revocation and renewal retain the original worker and
+all application history. Completed and uncertain applications are never retried.
+
+`POST /api/codex/runner` and `GET /api/codex/resumes/<id>` accept the capability in
+an Authorization header, without cookies or query parameters. The normal browser
+API retains its session/CSRF checks. Only public source and workflow instructions
+are served at `/codex/runner.py` and `/codex/workflow.md`. The desktop client uses
+private temporary files, verifies downloaded resume size and SHA-256, and never
+follows redirects or automatically retries mutations. The website polls the
+selected active batch every ten seconds without discarding unsaved edits.
 
 ## Import the existing owner
 

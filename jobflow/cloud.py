@@ -141,13 +141,13 @@ class CloudHandler(JobflowHandler):
             self.send_header('Strict-Transport-Security', 'max-age=31536000')
         super().end_headers()
 
-    def _allowed_host(self, navigation=False):
+    def _allowed_host(self, navigation=False, runner=False):
         if self.headers.get('Host') != urlsplit(self.server.origin).netloc:
             raise WebError('This request does not match the configured application address.', 403)
         origin = self.headers.get('Origin')
         if origin and origin != self.server.origin:
             raise WebError('Cross-origin requests are not allowed.', 403)
-        if self.command == 'POST' and origin != self.server.origin:
+        if self.command == 'POST' and origin != self.server.origin and not runner:
             raise WebError('Send changes from the application page.', 403)
         if navigation:
             # Public entry pages and email callbacks can arrive cross-site as
@@ -200,6 +200,67 @@ class CloudHandler(JobflowHandler):
     def _csrf(self, session):
         if not secrets.compare_digest(self.headers.get('X-CSRF-Token', ''), session['csrf_token']):
             raise WebError('Reload the app before saving changes.', 403)
+
+    def _codex_identity(self):
+        """A bearer is accepted only at the runner endpoints, never as a session."""
+        from .hosted_codex import AccessError, ACCESS_ERROR, authenticate, token_route
+        from .storage import Store
+        if urlsplit(self.path).query or self.headers.get('Cookie'):
+            raise WebError('Use a Codex bearer header without cookies or query parameters.', 403)
+        headers = self.headers.get_all('Authorization', [])
+        if len(headers) != 1 or not headers[0].startswith('Bearer '):
+            raise WebError(ACCESS_ERROR, 401)
+        token = headers[0][7:]
+        try:
+            account_id, unused = token_route(token)
+            account = self.server.accounts.get_account(account_id)
+            if not account or account.get('status') != 'active':
+                raise AccessError(ACCESS_ERROR)
+            root = self._root(account, hydrate=False)
+            store = Store(root / 'data/jobflow.sqlite3')
+            try:
+                authenticate(root, store, token, account_id)
+            finally:
+                store.close()
+        except (AccessError, ValueError):
+            raise WebError(ACCESS_ERROR, 401) from None
+        return account, root, token
+
+    def _codex_runner(self, payload=None, resume_id=None):
+        from .web import _json_action
+        account, root, token = self._codex_identity()
+        lock = self.server.account_lock(account['id'])
+        if not lock.acquire(blocking=False):
+            raise WebError('Another workspace update is running. Read the run again before continuing.', 409)
+        try:
+            with execution_context(root):
+                hydrate_workspace(root)
+                request = {'op': 'codex_hosted_resume' if resume_id is not None else 'codex_hosted_execute',
+                           'account_id': account['id'], 'token': token}
+                request.update({'resume_id': resume_id} if resume_id is not None else {'request': payload})
+                result = _json_action(root, request, 'batch')
+                if (remote_enabled() and payload and payload.get('op') == 'codex_report' and
+                        payload.get('status') == 'submitted'):
+                    try:
+                        self.server.queue.enqueue(account['id'], 'refresh')
+                    except (RemoteError, OSError, sqlite3.Error):
+                        result['warning'] = 'Submission saved. Full reports will refresh on the next scheduled run.'
+        finally:
+            lock.release()
+        if resume_id is not None:
+            self._respond(200, base64.b64decode(result['content_base64'], validate=True), 'application/octet-stream')
+        else:
+            self._respond(200, result)
+
+    def _codex_browser_action(self, root, account, payload):
+        from .web import _json_action
+        from .codex_handoff import hosted_handoff
+        operation = payload['op']
+        mapped = {'codex_prepare': 'codex_hosted_prepare', 'codex_renew': 'codex_hosted_renew',
+                  'codex_revoke': 'codex_hosted_revoke', 'codex_discard': 'codex_discard'}[operation]
+        request = {key: payload[key] for key in ('batch_id', 'revision', 'workspace_id', 'job_ids') if key in payload}
+        request.update(op=mapped, account_id=account['id'])
+        return hosted_handoff(self.server.origin, _json_action(root, request, 'batch'))
 
     def _json(self, maximum=MAX_REQUEST_BYTES):
         if self.headers.get('Transfer-Encoding'):
@@ -263,6 +324,14 @@ class CloudHandler(JobflowHandler):
                 self._auth_callback()
                 return
             self._allowed_host(navigation=path in ('/', '/index.html', '/account', '/account.html'))
+            if path in ('/codex/runner.py', '/codex/workflow.md'):
+                source = (Path(__file__).with_name('hosted_codex_client.py') if path.endswith('.py') else
+                          Path(__file__).resolve().parents[1] / 'HOSTED_CODEX_APPLICATIONS.md')
+                self._respond(200, source.read_bytes(), 'text/plain; charset=utf-8')
+                return
+            if path.startswith('/api/codex/resumes/'):
+                self._codex_runner(resume_id=path[len('/api/codex/resumes/'):])
+                return
             if path == '/auth/callback.js':
                 # A fresh document navigation ensures Strict session cookies are
                 # sent after returning from the provider's cross-site redirect.
@@ -311,7 +380,7 @@ class CloudHandler(JobflowHandler):
                 if not onboarding_complete(root):
                     raise WebError('Complete your profile before preparing applications.', 409)
                 self._respond(200, {**batch_snapshot(root), 'csrf_token': session['csrf_token'],
-                                    'codex': {'available': False, 'reason': 'Open your local Jobflow workspace to run applications with Codex on this computer.'}})
+                                    'codex': {'available': True, 'mode': 'hosted'}})
             elif path == '/api/resumes':
                 from .resumes import resume_library
                 self._respond(200, {**resume_library(root), 'csrf_token': session['csrf_token']})
@@ -333,7 +402,8 @@ class CloudHandler(JobflowHandler):
                 batch = batch_detail(root, path[len('/api/batches/'):])
                 if batch is None:
                     raise WebError('Application batch not found.', 404)
-                self._respond(200, batch)
+                from .application_batches import workspace_id
+                self._respond(200, {**batch, 'workspace_id': workspace_id(root)})
             elif path.startswith('/api/application-resumes/'):
                 self._resume(root, path[len('/api/application-resumes/'):])
             elif path == '/browser-worker.zip':
@@ -350,6 +420,8 @@ class CloudHandler(JobflowHandler):
             self._error(error)
         except RemoteError:
             self._respond(503, {'error': 'Your private workspace is temporarily unavailable. Please retry shortly.'})
+        except subprocess.TimeoutExpired:
+            self._respond(504, {'error': 'The request took too long. Read the run state before continuing.'})
         except (OSError, sqlite3.Error):
             self._respond(500, {'error': 'Your workspace could not be read. Please try again.'})
 
@@ -448,9 +520,12 @@ class CloudHandler(JobflowHandler):
                       'text/html; charset=utf-8')
 
     def do_POST(self):
+        path = urlsplit(self.path).path
         try:
-            self._allowed_host()
-            path = urlsplit(self.path).path
+            self._allowed_host(runner=path == '/api/codex/runner')
+            if path == '/api/codex/runner':
+                self._codex_runner(payload=self._json())
+                return
             if path in ('/api/auth/start', '/api/auth/verify'):
                 self._auth(path, self._json(8192))
                 return
@@ -503,7 +578,11 @@ class CloudHandler(JobflowHandler):
                     else:
                         if not onboarding_state(root)['complete']:
                             raise WebError('Complete your profile before saving workspace changes.', 409)
-                        result = perform_action(root, payload)
+                        if payload.get('action') == 'batch' and payload.get('op') in (
+                                'codex_prepare', 'codex_discard', 'codex_renew', 'codex_revoke'):
+                            result = self._codex_browser_action(root, account, payload)
+                        else:
+                            result = perform_action(root, payload)
                         if remote_enabled():
                             self.server.queue.enqueue(account['id'], 'refresh')
             finally:

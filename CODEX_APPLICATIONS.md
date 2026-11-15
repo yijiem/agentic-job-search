@@ -26,9 +26,12 @@ described there. New or missing eligibility, sponsorship, demographic, consent,
 or factual answers must come from you. Uncertain outcomes are never automatically
 retried. Resume an active run in its original Codex chat.
 
-The launch link uses the documented `codex://new?path=...&prompt=...` format.
-It cannot send a prompt automatically. This is a local desktop workflow; a hosted
-Jobflow server cannot give the desktop app access to its server filesystem.
+The local launch link uses `codex://new?path=...&prompt=...`. Hosted Jobflow uses
+`codex://new?prompt=...` and an expiring credential for the selected run, without
+a server filesystem path. Neither link sends the prompt automatically.
+For hosted runs, follow [the hosted runner workflow](HOSTED_CODEX_APPLICATIONS.md).
+It downloads verified private resumes and syncs progress to the hosted account.
+Renew or revoke access from the batch; continue started runs in the original chat.
 See [OpenAI's desktop-link reference](https://learn.chatgpt.com/docs/reference/commands#deep-links).
 
 ## Instructions for the Codex runner

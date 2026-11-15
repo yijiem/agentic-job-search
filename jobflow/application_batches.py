@@ -212,7 +212,7 @@ def _codex_status(batch):
 
 
 def _public_codex_run(run):
-    return {**{key: copy.deepcopy(value) for key, value in run.items() if key not in ('materials', 'worker_id')},
+    return {**{key: copy.deepcopy(value) for key, value in run.items() if key not in ('materials', 'worker_id', 'hosted_access')},
             'started': bool(run.get('worker_id'))}
 
 
@@ -414,7 +414,13 @@ def batch_snapshot(root):
 
 def batch_detail(root, batch_id):
     _id(batch_id, 'batch')
-    return next((batch for batch in batch_snapshot(root)['batches'] if batch['id'] == batch_id), None)
+    from .storage import Store
+    store = Store(Path(root) / 'data/jobflow.sqlite3')
+    try:
+        batch = store.get(BATCH_KIND, batch_id)
+        return _public_batch(batch) if batch else None
+    finally:
+        store.close()
 
 
 def _resume_directory(root, create=False):
@@ -1359,6 +1365,9 @@ def perform_batch_action(root, store, config, profile, payload):
     if 'workspace_id' in payload and payload['workspace_id'] != workspace_id(root):
         raise ValueError('This request belongs to a different Jobflow workspace.')
     op = payload.get('op')
+    if isinstance(op, str) and op.startswith('codex_hosted_'):
+        from .hosted_codex import perform_hosted_action
+        return perform_hosted_action(root, store, payload)
     if isinstance(op, str) and op.startswith('codex_'):
         if op not in ('codex_prepare', 'codex_discard') and payload.get('workspace_id') != workspace_id(root):
             raise ValueError('Codex must identify the selected workspace.')

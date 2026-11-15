@@ -50,6 +50,9 @@ class RemoteAccounts:
     def list_accounts(self):
         return self.client.rpc('jobflow_account_list', {})
 
+    def get_account(self, account_id):
+        return self.client.rpc('jobflow_account_get', {'p_account': _uuid(account_id)})
+
     def authenticate_identity(self, user_id, email):
         if (not isinstance(user_id, str) or not user_id or len(user_id) > 255
                 or any(ord(char) < 33 for char in user_id)):

@@ -7,10 +7,19 @@
   const editable = new Set(['pending','ready','needs_input','failed']);
   const terminal = new Set(['submitted','skipped']);
   const applicantFields = [['first_name','First name','text'],['last_name','Last name','text'],['email','Email','email'],['phone','Phone','tel'],['location','Location','text'],['linkedin','LinkedIn URL','url'],['website','Website / portfolio URL','url']];
-  const ui = {data:null,workspace:null,runtime:null,active:false,loading:false,busy:false,error:'',notice:'',selected:'',creating:false,seed:[],pendingStart:null,timer:null,draft:null,edits:{},materialEdits:{},editRevisions:{},handoff:null,handoffReview:null,details:{},focus:null};
+  const ui = {data:null,workspace:null,runtime:null,active:false,loading:false,busy:false,error:'',notice:'',selected:'',creating:false,seed:[],pendingStart:null,timer:null,pollBlocked:false,draft:null,edits:{},materialEdits:{},editRevisions:{},handoff:null,handoffReview:null,details:{},focus:null};
   const button = (text, action, extra='', primary=false) => `<button type="button" class="button${primary?' primary':''}" data-batch-action="${action}" ${extra}${ui.busy?' disabled':''}>${text}</button>`;
   const safeLink = value => {try {const u=new URL(value);return ['https:','http:'].includes(u.protocol)?u.href:'';}catch{return '';}};
-  const codexLink = value => {try {const u=new URL(value);return u.protocol==='codex:'&&u.hostname==='new'&&!u.username&&!u.password&&['','/'].includes(u.pathname)&&u.searchParams.has('path')&&u.searchParams.has('prompt')?u.href:'';}catch{return '';}};
+  const codexLink = value => {
+    try {
+      const u=new URL(value),keys=[...u.searchParams.keys()];
+      return u.protocol==='codex:'&&u.host==='new'&&!u.username&&!u.password&&!u.hash&&['','/'].includes(u.pathname)&&
+        keys.every(key=>['path','prompt'].includes(key))&&u.searchParams.getAll('prompt').length===1&&u.searchParams.get('prompt')?.trim()&&
+        u.searchParams.getAll('path').length<=1&&(!u.searchParams.has('path')||u.searchParams.get('path')?.trim())?u.href:'';
+    } catch{return '';}
+  };
+  const hostedCodex = () => ui.data?.codex?.mode==='hosted';
+  const hostedWorkspace = () => Boolean(ui.workspace?.account?.hosted||hostedCodex());
   const formatTime = value => {try{return value?new Intl.DateTimeFormat('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)):'Not yet connected';}catch{return 'Time unavailable';}};
   const getBatch = () => (ui.data?.batches||[]).find(b=>b.id===ui.selected);
   const resumeById = id => (ui.data?.resumes||[]).find(r=>r.id===id);
@@ -89,7 +98,7 @@
     return `<div class="batch-fields">${applicantFields.map(([key,label,type])=>`<div class="field"><label for="${prefix}-${key}">${label}${['first_name','last_name','email'].includes(key)?' *':''}</label><input id="${prefix}-${key}" class="input" type="${type}" name="${key}" data-batch-applicant="${key}" value="${escape(values[key]||'')}" maxlength="1000" ${['first_name','last_name','email'].includes(key)?'required':''} autocomplete="${{first_name:'given-name',last_name:'family-name',email:'email',phone:'tel'}[key]||'off'}"></div>`).join('')}</div>`;
   }
   function codexHelp() {
-    return `<section class="batch-codex card"><h2>Apply with Codex</h2><p>Choose a batch and review its saved materials, then open a prepared request in Codex. Codex inspects employer forms, asks for missing answers, and reports progress and actual confirmations here.</p><p class="tiny muted">Press Send in Codex to start. Keep your browser available for sign-in or verification. ${ui.data?.codex?.available===false?escape(ui.data.codex.reason||'Open your local Jobflow workspace to use Codex.'):''}</p></section>`;
+    return `<section class="batch-codex card"><h2>Apply with Codex</h2><p>Choose a batch and review its saved materials, then open a prepared request in Codex. Codex inspects employer forms, asks for missing answers, and reports progress and actual confirmations here.</p>${hostedCodex()?'<p>Codex receives access to the selected hosted batch and its resumes. Progress syncs back to this workspace.</p>':''}<p class="tiny muted">Press Send in Codex to start. Keep your browser available for sign-in or verification. ${ui.data?.codex?.available===false?escape(ui.data.codex.reason||'Codex is unavailable for this workspace.'):''}</p></section>`;
   }
   function codexItems(batch) {
     return (batch.items||[]).filter(item=>['pending','ready','needs_input','failed','queued'].includes(item.status));
@@ -99,11 +108,25 @@
   function canPrepareCodex(batch) {
     return Boolean(batch&&ui.data?.codex?.available===true&&!reservedRun(batch)?.started&&!hasEdits()&&!ui.busy&&!['cancelled','paused','complete'].includes(batch.status)&&codexItems(batch).length);
   }
+  function canManageCodexAccess(batch) {
+    return Boolean(hostedCodex()&&ui.data?.codex?.available===true&&reservedRun(batch)?.started&&!hasEdits()&&!ui.busy&&!['cancelled','complete'].includes(batch.status));
+  }
+  function codexAvailabilityNote(batch,started) {
+    if(ui.data?.codex?.available===false)return ui.data.codex.reason||'Codex is unavailable for this workspace.';
+    if(hasEdits())return 'Save your edited answers and materials before continuing in Codex.';
+    if(batch.status==='paused')return 'This batch is paused. Resume the batch to continue applications in Codex.';
+    if(!started&&['complete','cancelled'].includes(batch.status))return 'This batch is '+batch.status+'.';
+    if(!codexItems(batch).length&&!started)return 'No roles are ready for a new request. Resolve uncertain outcomes before trying those applications again.';
+    return '';
+  }
   function codexProgress(batch) {
     const run=batch.codex_run,status=run?.status,started=Boolean(reservedRun(batch)?.started);
+    const availability=codexAvailabilityNote(batch,started);
+    const accessNotice=run?.handoff_revoked_at?'Codex access has been revoked. Renew access in the original chat to continue.':run?.handoff_expires_at&&new Date(run.handoff_expires_at).getTime()<=Date.now()?'Codex access has expired. Renew access in the original chat to continue.':'';
+    const accessControls=hostedCodex()&&started?`<div class="button-group">${button('Renew Codex access','codex-renew',canManageCodexAccess(batch)?'':'disabled')}${button('Revoke Codex access','codex-revoke',canManageCodexAccess(batch)&&!run?.handoff_revoked_at?'':'disabled')}</div>${accessNotice?`<p class="batch-note">${escape(accessNotice)}</p>`:''}`:'';
     const names={awaiting_start:'Waiting for you to start in Codex',running:'Codex is working',needs_input:'Codex needs your answers',ready:'Codex has inspected the form',uncertain:'Check the application outcome',paused:'Codex run paused',complete:'Codex run finished',failed:'Codex could not continue',cancelled:'Codex run cancelled'};
     const explanation=status==='awaiting_start'?'The request is prepared. Open it in Codex and press Send to begin.':status==='running'?'Follow the application steps in your Codex chat. Results will appear here as Codex records them.':status==='needs_input'?'Answer the missing questions in your original Codex chat, then continue there.':status==='complete'?'Check each role below for its confirmed result or next step.':status==='uncertain'?'Check the actual employer confirmation before continuing. Jobflow will not automatically resubmit.':'';
-    return `${run?`<div class="batch-codex-status" role="status" aria-live="polite"><strong>${escape(names[status]||status||'Codex request prepared')}</strong>${explanation?`<p>${explanation}</p>`:''}${run.message?`<p>${escape(run.message)}</p>`:''}</div>`:''}${started?'<p class="batch-note">Continue in the original Codex chat for this run. A new chat cannot take over work that has already started.</p>':`<div class="button-group">${button(status==='awaiting_start'?'Open prepared request':'Open in Codex','codex-review',canPrepareCodex(batch)?'':'disabled',true)}${status==='awaiting_start'?button('Cancel prepared request','codex-discard'):''}</div>`}${status==='awaiting_start'?'<p class="batch-note">Materials are reserved for this request. Cancel the prepared request to edit them before starting.</p>':''}${hasEdits()?'<p class="batch-note">Save your edited answers and materials before continuing in Codex.</p>':!codexItems(batch).length&&!started?'<p class="batch-note">No roles are ready for a new request. Resolve uncertain outcomes before trying those applications again.</p>':''}`;
+    return `${run?`<div class="batch-codex-status" role="status" aria-live="polite"><strong>${escape(names[status]||status||'Codex request prepared')}</strong>${explanation?`<p>${explanation}</p>`:''}${run.message?`<p>${escape(run.message)}</p>`:''}</div>`:''}${started?'<p class="batch-note">Continue in the original Codex chat for this run. A new chat cannot take over work that has already started.</p>':`<div class="button-group">${button(status==='awaiting_start'?'Open prepared request':'Open in Codex','codex-review',canPrepareCodex(batch)?'':'disabled',true)}${status==='awaiting_start'?button('Cancel prepared request','codex-discard'):''}</div>`}${accessControls}${status==='awaiting_start'?'<p class="batch-note">Materials are reserved for this request. Cancel the prepared request to edit them before starting.</p>':''}${availability?`<p class="batch-note">${escape(availability)}</p>`:''}`;
   }
   function reviewCodex(batch) {
     if(!canPrepareCodex(batch))return;
@@ -112,10 +135,11 @@
     ui.runtime?.showDialog?.(`<h2>Review your Codex request</h2><p>${escape(batch.name)} · ${items.length} role${items.length===1?'':'s'}</p><p>Codex asks for missing answers or required consent, then fills and submits the applications you authorize. Pressing Send in Codex authorizes uploading these reviewed materials and your supplied answers to the listed employers.</p><div class="batch-handoff-roles">${items.map(item=>{const id=item.resume_id||batch.resume_id,resume=resumeById(id);return `<article><strong>${escape(item.company)} · ${escape(item.title)}</strong><p>Resume: ${escape(resume?.label||resume?.filename||'Unavailable')}</p>${resumePreview(id)}</article>`;}).join('')}</div><p class="batch-note">Applicant: ${escape([batch.applicant?.first_name,batch.applicant?.last_name].filter(Boolean).join(' '))} · ${escape(batch.applicant?.email||'Email not saved')}</p>${excluded?`<p class="batch-note">${excluded} role${excluded===1?' is':'s are'} excluded because work is in progress, an outcome needs checking, or it is already finished.</p>`:''}<p class="batch-note">Preparing this request reserves these roles for Codex. No application is sent by this button.</p><div id="form-error" role="alert"></div><div class="button-group">${button('Prepare request','codex-prepare','',true)}</div>`);
   }
   function showCodexHandoff(result,batchId) {
-    if(result.run?.started){ui.handoff=null;ui.runtime?.showDialog?.('<h2>Continue in your Codex chat</h2><p>This run has already started. Return to the original Codex chat to answer questions and continue the applications. Progress remains visible in this batch.</p>');return;}
-    const link=codexLink(result.launch_url),prompt=typeof result.prompt==='string'?result.prompt:'';
+    const renewal=Boolean(hostedCodex()&&result.run?.started&&result.prompt);
+    if(result.run?.started&&!renewal){ui.handoff=null;ui.runtime?.showDialog?.('<h2>Continue in your Codex chat</h2><p>This run has already started. Return to the original Codex chat to answer questions and continue the applications. Progress remains visible in this batch.</p>');return;}
+    const link=renewal?'':codexLink(result.launch_url),prompt=typeof result.prompt==='string'?result.prompt:'';
     ui.handoff={batchId,runId:result.run?.id,workspaceId:ui.data?.workspace_id,prompt,launch_url:link};
-    ui.runtime?.showDialog?.(`<h2>Your Codex request is ready</h2><p>Opens a prepared request. Press Send in Codex to start. Keep your browser available. No application is sent by this button.</p><p class="batch-note">Sending the request in Codex authorizes uploading the reviewed materials and supplied answers to the listed employers and submitting those applications. Codex asks for missing answers or required consent.</p><div class="button-group">${link?`<a class="button primary" href="${escape(link)}">Open in Codex</a>`:'<span class="batch-note">The Codex link is unavailable. Copy the request into Codex instead.</span>'}${prompt?button('Copy request','codex-copy'):''}</div>${prompt?`<details class="batch-handoff-fallback"><summary>View request to copy manually</summary><label class="sr-only" for="batch-codex-prompt">Prepared Codex request</label><textarea id="batch-codex-prompt" readonly rows="7">${escape(prompt)}</textarea></details>`:''}<p class="batch-note" data-batch-copy-status role="status" aria-live="polite">Jobflow will show “Codex is working” only after Codex starts the run.</p>`);
+    ui.runtime?.showDialog?.(`<h2>${renewal?'Codex access renewed':'Your Codex request is ready'}</h2><p>${renewal?'Copy this request into the original Codex chat for this run. It reconnects the same run and does not authorize additional applications.':'Opens a prepared request. Press Send in Codex to start. Keep your browser available. No application is sent by this button.'}</p>${!renewal?'<p class="batch-note">Sending the request in Codex authorizes uploading the reviewed materials and supplied answers to the listed employers and submitting those applications. Codex asks for missing answers or required consent.</p>':''}${hostedCodex()?`<p class="batch-note">This private request gives Codex access to this run’s selected roles and resumes and syncs progress back here.${result.handoff_expires_at?` Access expires ${escape(formatTime(result.handoff_expires_at))}.`:''} Keep the request private.</p>`:''}<div class="button-group">${link?`<a class="button primary" href="${escape(link)}">Open in Codex</a>`:!renewal?'<span class="batch-note">The Codex link is unavailable. Copy the request into Codex instead.</span>':''}${prompt?button('Copy request','codex-copy'):''}</div>${prompt?`<details class="batch-handoff-fallback"><summary>View request to copy manually</summary><label class="sr-only" for="batch-codex-prompt">Prepared Codex request</label><textarea id="batch-codex-prompt" readonly rows="7">${escape(prompt)}</textarea></details>`:''}<p class="batch-note" data-batch-copy-status role="status" aria-live="polite">${renewal?'Continue in the original Codex chat. The previous access request no longer works.':'Jobflow will show “Codex is working” only after Codex starts the run.'}</p>`);
   }
   function renderCreate() {
     const draft=ui.draft||(ui.draft=newDraft()), selection=selectRoles(ui.workspace,draft,ui.data?.batches,ui.seed);
@@ -192,7 +216,7 @@
       if(!response.ok)throw new Error(data.error||'Could not load application batches.');
       const old=getBatch(),changed=contentFingerprint(ui.data)!==contentFingerprint(data);
       if(ui.data?.workspace_id&&data.workspace_id!==ui.data.workspace_id){ui.edits={};ui.materialEdits={};ui.editRevisions={};ui.draft=null;ui.creating=false;ui.selected='';ui.details={};ui.handoff=null;ui.runtime?.closeDialog?.();resetHandoffReview();}
-      ui.data=data;
+      ui.data=data;ui.pollBlocked=false;
       if(ui.pendingStart){const ids=ui.pendingStart;ui.pendingStart=null;openBatchStart(ids);}
       if(ui.draft){
         if(!ui.draft.resumeTouched)ui.draft.resume_id=data.default_resume_id||data.resumes?.[0]?.id||ui.draft.resume_id;
@@ -206,7 +230,29 @@
       if(force||(changed&&!hasEdits()))draw();
       else {updateCodexProgress();if(changed){const message=document.querySelector('#batch-live-message');if(message)message.textContent=ui.notice||'Progress refreshed. Your unsaved answers are retained.';}}
     } catch(error){ui.error=error.message;if(force||!ui.data)draw();}
-    finally{ui.loading=false;}
+    finally{ui.loading=false;if(force&&hostedWorkspace())schedule();}
+  }
+  async function loadHostedProgress() {
+    const current=getBatch(),workspaceId=ui.data?.workspace_id;
+    if(ui.loading||ui.busy||!current)return;
+    ui.loading=true;
+    try {
+      const response=await fetch('/api/batches/'+encodeURIComponent(current.id),{cache:'no-store'}),data=await response.json();
+      if(!response.ok){if([401,403,404].includes(response.status))ui.pollBlocked=true;throw new Error(data.error||'Could not refresh this batch.');}
+      if(!ui.active||ui.data?.workspace_id!==workspaceId||ui.selected!==current.id)return;
+      if(data.workspace_id!==workspaceId||data.id!==current.id){ui.pollBlocked=true;ui.handoff=null;ui.runtime?.closeDialog?.();throw new Error('The connected workspace changed. Reload Jobflow before continuing.');}
+      const {workspace_id,...batch}=data,changed=JSON.stringify(current)!==JSON.stringify(batch);
+      ui.data.batches=ui.data.batches.map(value=>value.id===batch.id?batch:value);
+      if(current.revision!==batch.revision)resetHandoffReview();
+      if(changed)ui.notice=hasEdits()?'Progress refreshed. Your unsaved answers are retained.':'Application progress updated.';
+      ui.error='';
+      if(changed&&!hasEdits())draw();
+      else {updateCodexProgress();if(changed){const message=document.querySelector('#batch-live-message');if(message)message.textContent=ui.notice;}}
+    } catch(error){
+      ui.error=error.message;
+      if(!hasEdits())draw();
+      else {const message=document.querySelector('#batch-live-message');if(message)message.textContent=ui.error+' Your unsaved answers are retained.';}
+    } finally{ui.loading=false;}
   }
   async function action(payload,notice) {
     if(ui.busy)return null;
@@ -338,7 +384,7 @@
   }
   async function click(event) {
     const node=event.target.closest?.('[data-batch-action],[data-batch-open]');if(!node)return;
-    if(node.dataset.batchOpen){ui.selected=node.dataset.batchOpen;resetHandoffReview();draw();return;}
+    if(node.dataset.batchOpen){ui.selected=node.dataset.batchOpen;resetHandoffReview();draw();if(hostedWorkspace())schedule();return;}
     const op=node.dataset.batchAction,batch=getBatch();
     if(['tailor-create','tailor-batch','tailor-role'].includes(op)){startTailoring(op,op==='tailor-role'?node.dataset.jobId:'');return;}
     if(op==='clear-tailored'&&ui.draft){delete ui.draft.resumeOverrides?.[node.dataset.jobId];ui.draft.dirty=true;draw();return;}
@@ -353,7 +399,18 @@
       const result=await action({op:'codex_prepare',batch_id:batch.id,revision:review.revision,job_ids:review.jobIds},'Codex request prepared. Open it in Codex and press Send to start.');
       if(!result)return;
       await load();
+      if(hostedWorkspace())schedule();
       if(ui.data?.workspace_id===workspaceId){const current=(ui.data.batches||[]).find(value=>value.id===batch.id)?.codex_run;const run=current?.id===result.run?.id?current:result.run;ui.notice=run?.started?'Continue in the original Codex chat.':'Codex request prepared. Open it in Codex and press Send to start.';draw();showCodexHandoff({...result,run},batch.id);}
+      return;
+    }
+    if(['codex-renew','codex-revoke'].includes(op)&&batch){
+      if(!canManageCodexAccess(batch)||op==='codex-revoke'&&batch.codex_run?.handoff_revoked_at)return;
+      if(op==='codex-revoke'&&!window.confirm('Revoke this run’s Codex access? Its progress and confirmations stay saved. You can renew access in the original Codex chat later.'))return;
+      const workspaceId=ui.data.workspace_id;
+      const result=await action({op:op==='codex-renew'?'codex_renew':'codex_revoke',batch_id:batch.id,revision:batch.revision},op==='codex-renew'?'Codex access renewed. Continue in the original chat.':'Codex access revoked. Saved progress is retained.');
+      if(!result)return;
+      ui.handoff=null;ui.runtime?.closeDialog?.();await load(true);
+      if(op==='codex-renew'&&ui.data?.workspace_id===workspaceId)showCodexHandoff(result,batch.id);
       return;
     }
     if(op==='codex-discard'&&batch){
@@ -365,7 +422,7 @@
     if(op==='codex-copy'){
       if(!ui.handoff?.prompt||ui.handoff.workspaceId!==ui.data?.workspace_id)return;
       const status=document.querySelector('[data-batch-copy-status]');
-      try{if(!globalThis.navigator?.clipboard?.writeText)throw new Error('Clipboard unavailable');await navigator.clipboard.writeText(ui.handoff.prompt);if(status)status.textContent='Request copied. Paste it into Codex and press Send to start.';}
+      try{if(!globalThis.navigator?.clipboard?.writeText)throw new Error('Clipboard unavailable');await navigator.clipboard.writeText(ui.handoff.prompt);if(status)status.textContent=getBatch()?.codex_run?.started?'Request copied. Paste it into the original Codex chat for this run.':'Request copied. Paste it into Codex and press Send to start.';}
       catch{if(status)status.textContent='Copy the prepared request from “View request to copy manually” below.';}
       return;
     }
@@ -377,13 +434,19 @@
       if(result)resetHandoffReview();await load(true);
     }
   }
-  function shouldPoll() {return ui.active&&!ui.workspace?.account?.hosted&&ui.data?.codex?.available!==false;}
+  function shouldPoll() {
+    if(!ui.active||ui.pollBlocked||ui.data?.codex?.available===false)return false;
+    if(!hostedWorkspace())return true;
+    const batch=getBatch(),run=batch&&reservedRun(batch);
+    return Boolean(hostedCodex()&&run&&!run.handoff_revoked_at&&
+      (!run.handoff_expires_at||new Date(run.handoff_expires_at).getTime()>Date.now())&&
+      (batch.status!=='paused'||batch.items?.some(item=>['inspecting','running','submitting'].includes(item.status))));
+  }
   function schedule() {
     clearTimeout(ui.timer);ui.timer=null;
-    // Hosted batches have no local Codex worker. Opening the view and explicit
-    // actions still refresh it, without repeatedly transferring private records.
+    // Hosted polling reads only the selected live batch, never the resume library.
     if(!shouldPoll())return;
-    ui.timer=setTimeout(async()=>{ui.timer=null;if(!shouldPoll())return;await load();schedule();},5000);
+    ui.timer=setTimeout(async()=>{ui.timer=null;if(!shouldPoll()){if(ui.active&&hostedWorkspace())updateCodexProgress();return;}await (hostedWorkspace()?loadHostedProgress():load());schedule();},hostedWorkspace()?10000:5000);
   }
   function mount(runtime) {ui.runtime=runtime;const wasActive=ui.active;ui.active=true;restoreFocus();if(!wasActive){load(true,true);schedule();}}
   function unmount() {ui.active=false;clearTimeout(ui.timer);ui.timer=null;}

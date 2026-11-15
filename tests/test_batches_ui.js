@@ -17,12 +17,24 @@ function harness(data) {
         if(data.prepareError)return {ok:false,json:async()=>({error:data.prepareError})};
         const batch=data.batches.find(value=>value.id===payload.batch_id);
         if(!batch.codex_run||['complete','cancelled'].includes(batch.codex_run.status))batch.codex_run={id:'run-fixture',status:'awaiting_start',started:false,job_ids:payload.job_ids};
-        return {ok:true,json:async()=>({ok:true,batch,run:batch.codex_run,launch_url:data.launch_url||'codex://new?path=%2Fworkspace&prompt=Apply%20to%20the%20prepared%20batch',prompt:data.prompt||'Apply to the prepared batch and record actual confirmations.'})};
+        return {ok:true,json:async()=>({ok:true,batch,run:batch.codex_run,launch_url:data.launch_url||'codex://new?path=%2Fworkspace&prompt=Apply%20to%20the%20prepared%20batch',prompt:data.prompt||'Apply to the prepared batch and record actual confirmations.',handoff_expires_at:data.handoff_expires_at})};
+      }
+      if(['codex_renew','codex_revoke'].includes(payload.op)){
+        const batch=data.batches.find(value=>value.id===payload.batch_id);
+        if(payload.op==='codex_revoke')batch.codex_run.handoff_revoked_at=new Date().toISOString();
+        else {delete batch.codex_run.handoff_revoked_at;batch.codex_run.handoff_expires_at=new Date(Date.now()+43200000).toISOString();}
+        return {ok:true,json:async()=>({ok:true,batch,run:batch.codex_run,prompt:payload.op==='codex_renew'?'Reconnect this same run in the original Codex chat.':'',handoff_expires_at:batch.codex_run.handoff_expires_at})};
       }
       if(payload.op==='codex_discard')delete data.batches.find(value=>value.id===payload.batch_id).codex_run;
       return {ok:true,json:async()=>({ok:true,batch:data.batches[0]})};
     }
-    reads.push(url);return {ok:true,json:async()=>JSON.parse(JSON.stringify(data))};
+    reads.push(url);
+    if(url.startsWith('/api/batches/')){
+      if(data.progressError)return {ok:false,status:data.progressError.status,json:async()=>({error:data.progressError.message})};
+      const batch=data.batches.find(value=>value.id===decodeURIComponent(url.slice('/api/batches/'.length)));
+      return {ok:Boolean(batch),status:batch?200:404,json:async()=>JSON.parse(JSON.stringify(batch?{...batch,workspace_id:data.progressWorkspace||data.workspace_id}:{error:'Batch not found.'}))};
+    }
+    return {ok:true,json:async()=>JSON.parse(JSON.stringify(data))};
   }});
   vm.runInContext(source,context,{filename:'batches.js'});
   const api=context.window.JobflowBatches;
@@ -39,6 +51,7 @@ async function main(){
     const app=harness(data),hosted={...workspace,account:{hosted:true}};
     await app.load(hosted);
     assert.equal(app.timers.length,0,'Hosted mode does not schedule full batch snapshots');
+    assert.match(app.api.render(hosted).match(/<section class="batch-codex-actions"[\s\S]*?<\/section>/)?.[0]||'',/Use the local workspace for Codex/,'Unavailable reason appears beside the disabled control');
     const before=app.reads.length;
     await app.listeners.click(batchClick('reload'));
     assert.equal(app.reads.length,before+2,'Explicit refresh still restores resumes and reads the current hosted batch');
@@ -63,6 +76,102 @@ async function main(){
     await app.timers[0]();
     assert.equal(app.reads.length,before+1);
     assert.equal(app.timerDelays.at(-1),5000);
+  }
+  {
+    const data=snapshot(),hosted={...workspace,account:{hosted:true}};
+    data.codex={available:true,mode:'hosted'};
+    data.launch_url='codex://new?prompt=Connect%20the%20hosted%20batch';
+    data.handoff_expires_at=new Date(Date.now()+43200000).toISOString();
+    const app=harness(data);await app.load(hosted);
+    assert.equal(app.timers.length,0,'Idle hosted batches do not poll');
+    assert.doesNotMatch(codexButton(app.api.render(hosted)),/\bdisabled\b/,'Hosted handoff is available');
+    await app.listeners.click(batchClick('codex-review'));
+    await app.listeners.click(batchClick('codex-prepare'));
+    assert.match(app.dialogs.at(-1),/<a[^>]*href="codex:\/\/new\?prompt=/,'Hosted launch does not need a local folder');
+    assert.match(app.dialogs.at(-1),/selected roles and resumes and syncs progress back here/);
+    assert.match(app.dialogs.at(-1),/Access expires/);
+    assert.match(app.dialogs.at(-1),/Keep the request private/);
+    assert.equal(app.timerDelays.at(-1),10000,'Prepared hosted requests poll at ten seconds');
+    const before=app.reads.length,maintenance=app.maintenanceWrites.length;
+    data.batches[0].codex_run.status='running';data.batches[0].codex_run.started=true;data.batches[0].revision++;
+    await app.timers.at(-1)();
+    assert.deepEqual(app.reads.slice(before),['/api/batches/batch-1'],'Hosted progress reads only the selected batch');
+    assert.equal(app.maintenanceWrites.length,maintenance,'Polling does not synchronize or download the resume library');
+    assert.match(app.api.render(hosted),/Codex is working/);
+    assert.match(app.api.render(hosted),/Renew Codex access/);
+    const timers=app.timers.length;
+    data.batches[0].codex_run.status='complete';data.batches[0].status='complete';
+    await app.timers.at(-1)();
+    assert.equal(app.timers.length,timers,'Completed hosted runs stop polling');
+    assert.equal(app.writes.length,1,'Reading remote progress never authorizes or submits applications');
+  }
+  {
+    const data=snapshot(),hosted={...workspace,account:{hosted:true}};
+    data.codex={available:true,mode:'hosted'};data.batches[0].codex_run={id:'hosted-run',status:'running',started:true,job_ids:['one']};
+    const app=harness(data);await app.load(hosted);
+    app.api.unmount();
+    const before=app.reads.length;
+    await app.timers.at(-1)();
+    assert.equal(app.reads.length,before,'Leaving the batches view cancels hosted progress reads');
+  }
+  {
+    const data=snapshot(),hosted={...workspace,account:{hosted:true}};
+    data.codex={available:true,mode:'hosted'};data.batches[0].codex_run={id:'hosted-run',status:'running',started:true,job_ids:['one']};
+    const app=harness(data);await app.load(hosted);
+    const review={dataset:{batchReview:'one'}};
+    app.listeners.input({target:{dataset:{batchAnswer:'work',answerType:'select'},value:'No',closest(selector){return selector==='[data-batch-review]'?review:null;},hasAttribute(){return false;}},type:'input'});
+    const progress={innerHTML:''};app.nodes.set('[data-batch-codex-progress]',progress);
+    const before=app.stats.renders;
+    data.batches[0].revision++;data.batches[0].codex_run.status='needs_input';
+    await app.timers.at(-1)();
+    assert.equal(app.stats.renders,before,'Hosted progress does not redraw edited controls');
+    assert.match(progress.innerHTML,/Codex needs your answers/);
+    assert.match(app.api.render(hosted),/value="No" selected/);
+    assert.match(progress.innerHTML,/data-batch-action="codex-renew" disabled/);
+    await app.listeners.click(batchClick('codex-renew'));
+    await app.listeners.click(batchClick('codex-revoke'));
+    assert.equal(app.writes.length,0,'Pending material edits block access changes');
+  }
+  {
+    const data=snapshot(),hosted={...workspace,account:{hosted:true}};
+    data.codex={available:true,mode:'hosted'};data.batches[0].status='active';
+    data.batches[0].codex_run={id:'hosted-run',status:'needs_input',started:true,job_ids:['one'],handoff_expires_at:'2020-01-01T00:00:00Z'};
+    const app=harness(data);await app.load(hosted);
+    assert.equal(app.timers.length,0,'Expired access does not poll indefinitely');
+    assert.match(app.api.render(hosted),/Codex access has expired/);
+    await app.listeners.click(batchClick('codex-renew'));
+    assert.deepEqual(app.writes[0],{action:'batch',op:'codex_renew',batch_id:'batch-1',revision:3,workspace_id:'workspace'});
+    assert.match(app.dialogs.at(-1),/Codex access renewed/);
+    assert.match(app.dialogs.at(-1),/original Codex chat/);
+    assert.doesNotMatch(app.dialogs.at(-1),/href="codex:/,'A started run never launches a different chat');
+    await app.listeners.click(batchClick('codex-copy'));
+    assert.deepEqual(app.copied,['Reconnect this same run in the original Codex chat.']);
+    assert.equal(app.timerDelays.at(-1),10000,'Renewed access resumes progress updates');
+    app.context.window.confirm=()=>false;
+    await app.listeners.click(batchClick('codex-revoke'));
+    assert.equal(app.writes.length,1,'Cancelling the revoke dialog keeps access intact');
+    app.context.window.confirm=()=>true;
+    const timers=app.timers.length;
+    await app.listeners.click(batchClick('codex-revoke'));
+    assert.deepEqual(app.writes.at(-1),{action:'batch',op:'codex_revoke',batch_id:'batch-1',revision:3,workspace_id:'workspace'});
+    assert.match(app.api.render(hosted),/Codex access has been revoked/);
+    assert.equal(app.timers.length,timers,'Revoked access stops scheduled polling');
+    await app.listeners.click(batchClick('codex-copy'));
+    assert.equal(app.copied.length,1,'Revocation clears the old private request');
+  }
+  {
+    for(const failure of ['session','workspace']){
+      const data=snapshot(),hosted={...workspace,account:{hosted:true}};
+      data.codex={available:true,mode:'hosted'};data.batches[0].codex_run={id:'hosted-run',status:'running',started:true,job_ids:['one']};
+      const app=harness(data);await app.load(hosted);
+      if(failure==='session')data.progressError={status:401,message:'Sign in again to continue.'};
+      else data.progressWorkspace='another-account';
+      const before=app.timers.length;
+      await app.timers.at(-1)();
+      assert.equal(app.timers.length,before,'A failed session or account switch stops private batch polling');
+      assert.match(app.api.render(hosted),failure==='session'?/Sign in again/:/connected workspace changed/);
+      assert.equal(app.writes.length,0);
+    }
   }
   {
     const {api}=harness(snapshot());
@@ -159,7 +268,7 @@ async function main(){
     assert.equal(app.writes.length,0,'A changed batch cannot use a stale review dialog');
   }
   {
-    for(const launch_url of ['javascript:alert(1)','https://evil.example/new','codex://other?path=x&prompt=y']){
+    for(const launch_url of ['javascript:alert(1)','https://evil.example/new','codex://other?path=x&prompt=y','codex://new:80?prompt=y','codex://new?prompt=','codex://new?prompt=x&prompt=y','codex://new?prompt=x&unknown=y','codex://new?prompt=x#extra']){
       const data=snapshot();data.launch_url=launch_url;data.prompt='</textarea><script>bad()</script>';
       const app=harness(data);await app.load(workspace);
       await app.listeners.click(batchClick('codex-review'));await app.listeners.click(batchClick('codex-prepare'));
