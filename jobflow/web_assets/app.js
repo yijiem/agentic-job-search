@@ -45,7 +45,7 @@ function prettyDate(value, opts={}) { if (!value) return 'Date not recorded'; tr
 const initials = name => String(name || '?').replace(/[^\p{L}\p{N} ]/gu,'').split(/\s+/).slice(0,2).map(v=>v[0] || '').join('').toUpperCase();
 const companyLogo = company => {
   const path = window.JobflowCompanyLogos?.[company];
-  const local = typeof path === 'string' && /^\/logos\/[a-z0-9_-]+\.(png|ico|webp|svg)$/.test(path);
+  const local = typeof path === 'string' && /^\/logos\/[a-z0-9_-]+\.(png|jpe?g|ico|webp|svg)$/.test(path);
   return `<span class="company-logo${local ? ' has-image' : ''}" aria-hidden="true"><span>${esc(initials(company))}</span>${local ? `<img src="${esc(path)}" alt="" loading="lazy" decoding="async">` : ''}</span>`;
 };
 function currency(value, currency='USD') { if (value === null || value === undefined || value === '') return ''; return new Intl.NumberFormat('en-US',{style:'currency',currency:currency || 'USD',maximumFractionDigits:0,notation:Number(value)>=100000?'compact':'standard'}).format(Number(value)); }

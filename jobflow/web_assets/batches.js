@@ -22,6 +22,7 @@
   const hostedWorkspace = () => Boolean(ui.workspace?.account?.hosted||hostedCodex());
   const formatTime = value => {try{return value?new Intl.DateTimeFormat('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)):'Not yet connected';}catch{return 'Time unavailable';}};
   const getBatch = () => (ui.data?.batches||[]).find(b=>b.id===ui.selected);
+  const visibleBatches = () => (ui.data?.batches||[]).filter(b=>b.status!=='complete');
   const resumeById = id => (ui.data?.resumes||[]).find(r=>r.id===id);
   const resumePreview = id => {const resume=resumeById(id);return resume?`<a class="text-link batch-resume-preview" href="/api/application-resumes/${encodeURIComponent(resume.id)}" target="_blank" rel="noopener noreferrer">Preview ${escape(resume.filename)} ↗</a>`:'';};
   const activeRevision = batch => ui.editRevisions[batch.id] ?? batch.revision;
@@ -150,7 +151,8 @@
     return `<span class="chip ${status==='submitted'?'green':['needs_input','uncertain','failed'].includes(status)?'amber':''}">${escape(label)}</span>`;
   }
   function renderBatchList() {
-    const batches=ui.data?.batches||[];
+    const batches=visibleBatches();
+    if(!batches.length&&ui.data?.batches?.length) return '<div class="batch-empty"><h2>No unfinished batches</h2><p>Completed batches are hidden. Your application history is saved in <a class="text-link" href="#account">My account</a>.</p></div>';
     if(!batches.length) return '<div class="batch-empty"><h2>Your first batch starts here</h2><p>Group selected roles, a company’s top matches, or a day’s new opportunities. Your review and results stay together.</p></div>';
     return `<nav class="batch-list" aria-label="Saved application batches">${[...batches].reverse().map(b=>{const items=b.items||[],done=items.filter(i=>i.status==='submitted').length,attention=items.filter(i=>['needs_input','uncertain','failed'].includes(i.status)).length;return `<button class="batch-list-item${ui.selected===b.id?' selected':''}" data-batch-open="${escape(b.id)}"${ui.selected===b.id?' aria-current="true"':''}><span><strong>${escape(b.name||'Application batch')}</strong><small>${items.length} roles · ${escape(b.status||'draft')}</small></span><span class="batch-list-count">${done}/${items.length}<small>confirmed</small></span>${attention?`<em>${attention} need attention</em>`:''}</button>`;}).join('')}</nav>`;
   }
@@ -222,7 +224,7 @@
         if(!ui.draft.resumeTouched)ui.draft.resume_id=data.default_resume_id||data.resumes?.[0]?.id||ui.draft.resume_id;
         for(const [key,value] of Object.entries(data.applicant||{}))if(!ui.draft.applicantTouched?.[key])ui.draft.applicant[key]=value;
       }
-      if(!getBatch())ui.selected=data.batches?.[data.batches.length-1]?.id||'';
+      if(!getBatch()){const batches=visibleBatches();ui.selected=batches[batches.length-1]?.id||'';}
       const current=getBatch();
       if(old&&current&&old.revision!==current.revision)resetHandoffReview();
       if(!force&&old&&current&&JSON.stringify(old)!==JSON.stringify(current))ui.notice=hasEdits()?'Progress refreshed. Your unsaved answers are retained.':'Application progress updated.';

@@ -319,11 +319,27 @@ async function run() {
 
   {
     const app = appContext(fixture());
+    vm.runInContext(fs.readFileSync(path.join(assets, 'company-logos.js'), 'utf8'), app.context,
+      {filename: 'company-logos.js'});
+    const catalog = app.context.window.JobflowCompanyLogos;
+    assert.equal(catalog.Cognitiv, '/logos/cognitiv.jpg');
+    assert.equal(catalog.Robinhood, '/logos/robinhood.jpg');
+    for (const [company, logoPath] of Object.entries(catalog)) {
+      app.context.company = company;
+      assert.ok(fs.existsSync(path.join(assets, logoPath)), `${company} has a bundled logo file`);
+      assert.ok(app.evaluate('companyLogo(company)').includes(`<img src="${logoPath}" alt=""`),
+        `${company}'s bundled logo is rendered instead of falling back to initials`);
+    }
+  }
+
+  {
+    const app = appContext(fixture());
     app.context.window.JobflowCompanyLogos = {
-      Alpha: '/logos/alpha.svg', External: 'https://example.com/logo.png',
+      Alpha: '/logos/alpha.svg', JPEG: '/logos/example.jpeg', External: 'https://example.com/logo.png',
       Traversal: '/logos/../private.svg', Unsafe: '/logos/a.svg" onerror="bad()',
     };
     assert.match(app.evaluate('companyLogo("Alpha")'), /<img src="\/logos\/alpha\.svg" alt=""/);
+    assert.match(app.evaluate('companyLogo("JPEG")'), /<img src="\/logos\/example\.jpeg" alt=""/);
     for (const company of ['External', 'Traversal', 'Unsafe', 'Unmapped & Company']) {
       app.context.company = company;
       const fallback = app.evaluate('companyLogo(company)');

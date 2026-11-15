@@ -86,6 +86,14 @@
       "sha256": "e396af05d5d98f7597828e855a263763608dd0abc89ccbd492eb11cae7da14a2"
     },
     {
+      "company": "Bitdeer",
+      "file": "bitdeer.ico",
+      "source": "https://www.bitdeer.com/favicon.ico",
+      "page": "https://www.bitdeer.com/",
+      "observed_at": "2026-11-15",
+      "sha256": "a19ae70f09bda8614f8c161d72a4298ae9eb38cb6365888855af1943146b2997"
+    },
+    {
       "company": "Block",
       "file": "block.png",
       "source": "https://block.xyz/apple-touch-icon-reskin.png",
@@ -252,6 +260,15 @@
       "source": "https://www.docker.com/app/uploads/2024/02/cropped-docker-logo-favicon-180x180.png",
       "page": "https://www.docker.com/",
       "sha256": "5cb5caeeef34a0979a0b21640ea6bbbfb8345a9fff0d0e910c345ce4d0b65718"
+    },
+    {
+      "company": "DoubleVerify",
+      "file": "doubleverify.svg",
+      "source": "https://doubleverify.com/hubfs/DV_Website_FavIcon.svg",
+      "page": "https://doubleverify.com/",
+      "observed_at": "2026-11-15",
+      "sha256": "f82a9b9b68f28b9644965b3c55f08672293a39525fcb50d9f8469dd8cbf167ad",
+      "note": "Official favicon; embedded CSS fills converted to SVG fill attributes, preserving paths and colors. Embedded styles removed."
     },
     {
       "company": "Elation Health",
@@ -512,6 +529,14 @@
       "source": "https://about.nextdoor.com/hubfs/logo-nextdoor-favicon.png",
       "page": "https://about.nextdoor.com/",
       "sha256": "b899c9b9635134b12f330116f59a0a81f00404e6f8363180050348ef641a6dd3"
+    },
+    {
+      "company": "Nexthop AI",
+      "file": "nexthop-ai.png",
+      "source": "https://nexthop.ai/wp-content/uploads/2025/12/cropped-logo-with-icon-linkedin-400x400.png",
+      "page": "https://nexthop.ai/",
+      "observed_at": "2026-11-15",
+      "sha256": "1f8c300ea046f1fb6b6725c2a8fa8ba52f4b21e7de7d5879b1486d0f4423e044"
     },
     {
       "company": "Nooks",
