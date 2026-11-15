@@ -61,6 +61,40 @@ class WebTests(unittest.TestCase):
             self.assertEqual(result['jobs'], [])
             self.assertEqual(list(Path(empty).iterdir()), [])
 
+    def test_snapshot_defers_packet_bodies_and_omits_duplicate_plan_and_coaching_data(self):
+        packet = {'id': 'packet-1', 'job_id': 'job-1', 'markdown': 'Full review packet',
+                  'resume_markdown': 'Original evidence for the resume',
+                  'outreach': {'email': 'Draft requiring review'}}
+        task = {'id': 'task-1', 'title': 'Practice storage design', 'status': 'done',
+                'notes': 'Keep my completed task notes'}
+        notes = [{'text': 'Keep the daily preparation budget.'}]
+        research_notes = [{'text': 'Dated process guidance', 'sources': []}]
+        plan = {'id': 'current', 'tasks': [task], 'markdown': 'A full duplicate of the plan',
+                'notes': notes, 'research_notes': research_notes}
+        coaching = {'id': '2026-11-15', 'markdown': 'Full coaching export'}
+        for kind, row in (('packets', packet), ('tasks', task), ('plans', plan), ('coaching', coaching)):
+            self.store.put(kind, row['id'], row)
+        before = self.store.db.execute('SELECT * FROM records ORDER BY kind,id').fetchall()
+
+        result = snapshot(self.root)
+
+        self.assertEqual([{'id': 'packet-1', 'job_id': 'job-1'}], result['packets'])
+        self.assertEqual({'id': 'current', 'notes': notes, 'research_notes': research_notes}, result['plan'])
+        self.assertEqual([task], result['tasks'])
+        self.assertEqual([], result['plans'])
+        self.assertEqual([], result['coaching'])
+        self.assertNotIn(packet['markdown'], json.dumps(result))
+        self.assertNotIn(plan['markdown'], json.dumps(result))
+        self.assertNotIn(coaching['markdown'], json.dumps(result))
+        self.assertEqual(packet, job_detail(self.root, 'job-1')['packet'])
+        self.assertEqual(before, self.store.db.execute('SELECT * FROM records ORDER BY kind,id').fetchall())
+
+    def test_snapshot_preserves_missing_current_plan_as_none(self):
+        self.store.put('plans', 'historical', {'id': 'historical', 'notes': ['Past plan']})
+        result = snapshot(self.root)
+        self.assertIsNone(result['plan'])
+        self.assertEqual([], result['plans'])
+
     def test_profile_summary_is_read_only_and_allowlists_nested_evidence(self):
         path = self.root / 'config/profile.json'
         profile = {'name': 'Example Candidate', 'headline': 'Systems engineer',
@@ -214,20 +248,16 @@ class WebTests(unittest.TestCase):
 
     def test_save_queue_does_not_regress_existing_interview(self):
         self.store.put('applications', 'job-1', {'id': 'job-1', 'job_id': 'job-1', 'stage': 'technical'})
-        with patch('jobflow.web._run_cli') as cli:
-            result = perform_action(self.root, {'action': 'application', 'job_id': 'job-1', 'stage': 'saved'})
-        cli.assert_not_called()
+        result = perform_action(self.root, {'action': 'application', 'job_id': 'job-1', 'stage': 'saved'})
         self.assertEqual(result['skipped'], 1)
         self.assertEqual(self.store.get('applications', 'job-1')['stage'], 'technical')
 
     def test_invalid_batch_is_rejected_before_any_write(self):
-        with patch('jobflow.web._run_cli') as cli:
-            with self.assertRaises(WebError):
-                perform_action(self.root, {'action': 'application', 'job_ids': ['job-1', 'unknown'], 'stage': 'applied'})
-            with self.assertRaises(WebError):
-                perform_action(self.root, {'action': 'application', 'job_id': 'job-1', 'stage': 'applied',
-                                           'follow_up_date': '2026-02-30'})
-        cli.assert_not_called()
+        with self.assertRaises(WebError):
+            perform_action(self.root, {'action': 'application', 'job_ids': ['job-1', 'unknown'], 'stage': 'applied'})
+        with self.assertRaises(WebError):
+            perform_action(self.root, {'action': 'application', 'job_id': 'job-1', 'stage': 'applied',
+                                       'follow_up_date': '2026-02-30'})
         self.assertEqual(self.store.all('applications'), [])
 
     def test_completed_task_edit_preserves_completion_and_unexposed_metadata(self):
@@ -249,10 +279,9 @@ class WebTests(unittest.TestCase):
         self.assertEqual(raised.exception.status, 409)
 
     def test_interview_requires_explicit_timezone(self):
-        with patch('jobflow.web._run_cli') as cli, self.assertRaises(ValueError):
+        with self.assertRaises(ValueError):
             perform_action(self.root, {'action': 'interview', 'job_id': 'job-1',
                                       'starts_at': '2026-12-01T10:00:00', 'round': 'Coding'})
-        cli.assert_not_called()
 
 
 class HttpBoundaryTests(unittest.TestCase):

@@ -20,7 +20,7 @@ References: [Render pricing](https://render.com/pricing), [cron billing](https:/
 - `SUPABASE_SECRET_KEY` belongs only in backend environment settings. Never put it in browser code, Git, screenshots, or logs. The publishable key does not grant private data access.
 - PostgreSQL stores canonical records, original record timestamps, run history, account/session state, file manifests and the queue. Storage bucket `jobflow-private` must be private; no public object policies are needed.
 - Immutable objects are addressed by content hash. Files are uploaded before their manifest/reference is committed, and downloads verify SHA-256. Large text exports are compressed. Obsolete unreferenced objects can be retired after a 24-hour grace period; referenced resume versions remain intact.
-- Every workspace write carries a renewable database lease. Stale workers cannot overwrite a newer owner. Local cache operations are serialized within the web process.
+- Background/configuration workflows retain renewable database leases. Allowlisted user saves use short atomic compare-and-set transactions independently of those leases; protected shared records and collection membership are checked before commit. Foreground resume files publish their immutable manifests with their record transaction. Isolated disposable caches let these saves avoid unrelated web-process read locks.
 
 SQLite remains the default local backend. It is not used as remote durable state or uploaded as a live database object.
 
@@ -100,5 +100,7 @@ The imported profile goes directly into the existing account, skipping onboardin
 Verify that an anonymous request cannot execute a private RPC or download a stored object. Run the rollback-only SQL checks in `tests/sql/`, inspect Supabase advisors, and check the bucket remains private. Test two accounts for isolation and verify that an empty local cache reconstructs the same account state.
 
 Monitor the queue, source health and run history after actual scheduled searches. Source failures must remain visible and must never imply jobs closed. A queued refresh updates reports after interactive edits; the free website never performs full ingestion or full exports inline.
+
+Concurrent user saves require both foreground migrations (`20261115210835_foreground_record_transactions.sql` and `20261115210915_foreground_resume_files.sql`) before deploying the matching application code. Verify the rollback-only foreground SQL checks and that ordinary client roles remain denied. Primary edits commit before their derived preparation/report refresh; the configured cron cadence can delay those projections until a later check. See [performance and concurrent editing](PERFORMANCE.md) for the delivered behavior, measured payload reduction, cold-start/queue limitations and remaining rollout checks. That document describes source behavior, not proof that a hosted deployment has been updated.
 
 Create application-consistent off-host backups of PostgreSQL records and Storage manifests/objects before relying solely on the hosted copy. Supabase Free does not include automatic database backups. The verified original owner snapshot provides the initial recovery copy; it does not cover future hosted edits. Keep credentials out of backups and exercise a restore before opening the product to additional users.

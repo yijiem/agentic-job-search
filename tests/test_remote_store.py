@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 import uuid
+from copy import deepcopy
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -13,7 +14,7 @@ from urllib.error import HTTPError
 
 from jobflow import remote
 from jobflow.remote_store import RemoteStore, read_records
-from jobflow.storage import Store
+from jobflow.storage import Store, RecordConflictError
 
 
 class Reply(io.BytesIO):
@@ -71,8 +72,23 @@ class MemoryRPC:
                 self.rows[row['kind'], row['id']] = dict(row)
             self.revision += 1
             return len(params['p_rows'])
+        if name == 'jobflow_records_compare_and_set':
+            if not params['p_foreground'] and (not self.token or self.token != params['p_token']):
+                raise remote.RemoteBusyError('expired')
+            for row in params['p_expected']:
+                current = self.rows.get((row['kind'], row['id']))
+                if (current['body'] if current else None) != row['body']:
+                    return {'ok': False, 'conflict': True}
+            for collection in params['p_collections']:
+                current = sorted(key for kind, key in self.rows if kind == collection['kind'])
+                if current != sorted(collection['ids']):
+                    return {'ok': False, 'conflict': True}
+            for row in params['p_rows']:
+                self.rows[row['kind'], row['id']] = deepcopy(row)
+            self.revision += 1
+            return {'ok': True, 'revision': self.revision}
         if name == 'jobflow_records_page':
-            if self.conflict_after_first_page and params['p_after_id']:
+            if self.conflict_after_first_page and params['p_after_id'] and params['p_revision'] is not None:
                 return {'conflict': True}
             rows = sorted(self.rows.values(), key=lambda r: (r['kind'], r['created_at'], r['id']))
             rows = [r for r in rows if (not params['p_kind'] or r['kind'] == params['p_kind'])
@@ -364,7 +380,102 @@ class RemoteTests(unittest.TestCase):
         store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
         with remote.RemoteLease(self.root, client=self.client):
             store.put_groups({'applications': [{'id': 'a'}], 'tasks': [{'id': 't'}]})
-        self.assertEqual(1, sum(n == 'jobflow_records_put' for n, _ in self.client.calls))
+        self.assertEqual(1, sum(n == 'jobflow_records_compare_and_set' for n, _ in self.client.calls))
+
+    def test_foreground_commits_while_background_lease_is_held(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with remote.RemoteLease(self.root, client=self.client) as worker:
+            with store.optimistic():
+                store.put('applications', 'a', {'id': 'a', 'stage': 'saved'})
+                store.put('resume_reviews', 'r', {'id': 'r', 'revision': 1})
+                store.request_refresh()
+                self.assertNotIn(('applications', 'a'), self.client.rows)
+            self.assertEqual(worker.token, self.client.token)
+        saved = [params for name, params in self.client.calls if name == 'jobflow_records_compare_and_set']
+        self.assertEqual(len(saved), 1)
+        self.assertTrue(saved[0]['p_foreground'])
+        self.assertTrue(saved[0]['p_refresh'])
+        self.assertIsNone(saved[0]['p_token'])
+        self.assertEqual('saved', self.client.rows['applications', 'a']['body']['stage'])
+
+    def test_foreground_validation_failure_discards_all_records(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with self.assertRaisesRegex(ValueError, 'invalid'):
+            with store.optimistic():
+                store.put('applications', 'a', {'id': 'a'})
+                raise ValueError('invalid')
+        store.close()
+        self.assertEqual({}, self.client.rows)
+
+    def test_worker_cannot_overwrite_foreground_task_completion(self):
+        worker = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        user = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with remote.RemoteLease(self.root, client=self.client):
+            worker.put('tasks', 't', {'id': 't', 'status': 'todo', 'notes': ''})
+            stale = worker.get('tasks', 't')
+            with user.optimistic():
+                current = user.get('tasks', 't')
+                current.update(status='done', notes='Keep my work')
+                user.put('tasks', 't', current)
+            stale['due_date'] = '2026-11-16'
+            with self.assertRaises(RecordConflictError):
+                worker.put_groups({'tasks': [stale], 'plans': [{'id': 'current'}]})
+        self.assertEqual('done', self.client.rows['tasks', 't']['body']['status'])
+        self.assertNotIn(('plans', 'current'), self.client.rows)
+
+    def test_foreground_detects_new_batch_after_collection_read(self):
+        first = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        second = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with self.assertRaises(RecordConflictError):
+            with first.optimistic():
+                self.assertEqual([], first.all('application_batches'))
+                with second.optimistic():
+                    second.put('application_batches', 'other', {'id': 'other'})
+                first.put('application_batches', 'mine', {'id': 'mine'})
+        self.assertIn(('application_batches', 'other'), self.client.rows)
+        self.assertNotIn(('application_batches', 'mine'), self.client.rows)
+
+    def test_foreground_reads_its_writes_without_flushing(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with store.optimistic():
+            store.put('resume_reviews', 'r', {'id': 'r', 'revision': 1})
+            self.assertEqual(1, store.get('resume_reviews', 'r')['revision'])
+            self.assertEqual(['r'], [row['id'] for row in store.all('resume_reviews')])
+            store.flush()
+            self.assertEqual({}, self.client.rows)
+        self.assertEqual(1, self.client.rows['resume_reviews', 'r']['body']['revision'])
+
+    def test_foreground_refuses_ingestion_and_submission_worker_records(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        for kind in ('jobs', 'application_workers'):
+            with self.assertRaises(ValueError):
+                with store.optimistic():
+                    store.put(kind, 'a', {'id': 'a'})
+        self.assertEqual({}, self.client.rows)
+
+    def test_foreground_collection_read_ignores_unrelated_ingestion_revision(self):
+        self.client.rows = {('resume_reviews', str(i)): {
+            **self.row(str(i)), 'kind': 'resume_reviews', 'body': {'id': str(i), 'revision': 1}}
+            for i in range(3)}
+        self.client.conflict_after_first_page = True
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with patch('jobflow.remote_store.PAGE_SIZE', 2):
+            with store.optimistic():
+                self.assertEqual(3, len(store.all('resume_reviews')))
+                store.put('resume_reviews', 'new', {'id': 'new', 'revision': 1})
+        self.assertIn(('resume_reviews', 'new'), self.client.rows)
+
+    def test_foreground_reuses_selected_records_and_collection_reads(self):
+        self.client.rows = {('jobs', 'j'): self.row('j')}
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with store.optimistic():
+            for unused in range(4):
+                store.get('jobs', 'j')
+                store.get('applications', 'j')
+                store.all('application_batches')
+            store.put('applications', 'j', {'id': 'j', 'stage': 'saved'})
+        self.assertEqual(2, sum(name == 'jobflow_record_get' for name, unused in self.client.calls))
+        self.assertEqual(1, sum(name == 'jobflow_records_page' for name, unused in self.client.calls))
 
     def test_import_preserves_timestamps_and_verifies_without_downloading_bodies(self):
         store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)

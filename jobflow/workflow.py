@@ -1,6 +1,7 @@
 """Orchestrate the three agents against one durable state store."""
 import hashlib
 import json
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import datetime
@@ -12,6 +13,49 @@ from .preparation import build_plan
 from .relationships import build_packet
 from .sources import canonical_url, fetch_source, job_id
 from .storage import utcnow
+
+
+# Bump when the ranking algorithm changes, including changes to its inputs.
+MATCHING_VERSION = 1
+MATCHING_FIELDS = ('title', 'description', 'location', 'remote', 'workplace_type',
+                   'employment_type', 'compensation')
+MATCHING_RESULTS = ('score', 'eligible', 'reasons', 'gaps', 'matched_skills', 'compensation_status')
+SEARCH_WRITE_BATCH_SIZE = 50
+
+
+def _matching_context(profile, config):
+    return hashlib.sha256(json.dumps(
+        [MATCHING_VERSION, profile, config.get('search', config)],
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def _refresh_matching(job, profile, config, context, previous=None):
+    """Reuse only persisted derived results for identical ranking inputs."""
+    signature = hashlib.sha256(json.dumps(
+        [context, {key: job.get(key) for key in MATCHING_FIELDS}],
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    cached = job if previous is None else previous
+    if (cached.get('matching_input_signature') == signature
+            and all(key in cached for key in MATCHING_RESULTS)):
+        # Imported data cannot supply an arbitrary score or cached signature.
+        job.update({key: cached[key] for key in MATCHING_RESULTS})
+        job['matching_input_signature'] = signature
+        return False
+    job.update(match_job(job, profile, config))
+    job['matching_input_signature'] = signature
+    return True
+
+
+def _merged_job(raw, previous, key, profile, config, now, primary_sources, context):
+    job = dict(previous)
+    if previous.get('source_id') in primary_sources and raw.get('source_id') not in primary_sources:
+        job['also_seen_on'] = sorted(set(previous.get('also_seen_on', []) + [raw.get('source_id', 'manual-import')]))
+        return job, False
+    job.update(raw)
+    _refresh_matching(job, profile, config, context, previous=previous)
+    job.update(id=key, first_seen=previous.get('first_seen', now), last_seen=now,
+               availability='open', missing_scans=0)
+    return job, not bool(previous)
 
 
 def validate_daily_goals(config):
@@ -72,19 +116,12 @@ def ingest_job(store, raw, profile, config, seen_at=None, index=None):
                 break
     previous = store.get('jobs', key) or {}
     primary_sources = {s['id'] for s in config.get('sources', []) if s['kind'] != 'manual'}
-    if previous.get('source_id') in primary_sources and raw.get('source_id') not in primary_sources:
-        previous['also_seen_on'] = sorted(set(previous.get('also_seen_on', []) + [raw.get('source_id', 'manual-import')]))
-        store.put('jobs', key, previous)
-        return previous, False
-    job = dict(previous)
-    job.update(raw)
-    job.update(match_job(job, profile, config))
-    job.update(id=key, first_seen=previous.get('first_seen', now), last_seen=now,
-               availability='open', missing_scans=0)
+    job, fresh = _merged_job(raw, previous, key, profile, config, now, primary_sources,
+                             _matching_context(profile, config))
     store.put('jobs', key, job)
     if index is not None and canonical:
         index[canonical] = key
-    return job, not bool(previous)
+    return job, fresh
 
 
 def selected_sources(config, source_ids=None):
@@ -106,7 +143,7 @@ def selected_sources(config, source_ids=None):
 
 
 def search(store, config, profile, source_ids=None):
-    batch = store.batch(preload=('jobs',)) if hasattr(store, 'batch') else nullcontext()
+    batch = store.batch() if hasattr(store, 'batch') else nullcontext()
     with batch:
         return _search(store, config, profile, source_ids)
 
@@ -116,7 +153,33 @@ def _search(store, config, profile, source_ids=None):
     scope = {s['id'] for s in active} if source_ids is not None else None
     results = {'new_jobs': 0, 'fetched_jobs': 0, 'source_errors': {}, 'manual_sources': []}
     feeds = []
-    index = {canonical_url(j.get('url', '')): j['id'] for j in store.all('jobs')}
+    jobs_by_id = {job['id']: job for job in store.all('jobs')}
+    index = {canonical_url(job.get('url', '')): job['id'] for job in jobs_by_id.values()}
+    owned_ids = defaultdict(set)
+    for job in jobs_by_id.values():
+        owned_ids[job.get('source_id')].add(job['id'])
+    primary_sources = {s['id'] for s in config.get('sources', []) if s['kind'] != 'manual'}
+    context = _matching_context(profile, config)
+    pending = {}
+
+    def flush_jobs():
+        if pending:
+            store.put_many('jobs', list(pending.values()))
+            pending.clear()
+
+    def record_job(job):
+        key = job['id']
+        previous = jobs_by_id.get(key)
+        if job == previous:
+            return
+        if previous:
+            owned_ids[previous.get('source_id')].discard(key)
+        jobs_by_id[key] = job
+        owned_ids[job.get('source_id')].add(key)
+        pending[key] = job
+        if len(pending) >= SEARCH_WRITE_BATCH_SIZE:
+            flush_jobs()
+
     for source in active:
         if source['kind'] == 'manual':
             results['manual_sources'].append(source['id'])
@@ -141,27 +204,38 @@ def _search(store, config, profile, source_ids=None):
                 continue
             seen = set()
             for raw in jobs:
-                job, fresh = ingest_job(store, raw, profile, config, checked_at, index)
+                canonical = canonical_url(raw.get('url', ''))
+                key = index.get(canonical, job_id(raw))
+                job, fresh = _merged_job(raw, jobs_by_id.get(key, {}), key, profile, config,
+                                         checked_at, primary_sources, context)
+                record_job(job)
+                if canonical:
+                    index[canonical] = key
                 seen.add(job['id'])
                 results['new_jobs'] += int(fresh)
             results['fetched_jobs'] += len(jobs)
             # Closure is inferred only after two complete successful snapshots; never on failure.
-            for old in store.all('jobs'):
-                if old.get('source_id') == source['id'] and old['id'] not in seen:
-                    old['missing_scans'] = old.get('missing_scans', 0) + 1
-                    old['availability'] = 'closed' if old['missing_scans'] >= 2 else 'missing'
-                    store.put('jobs', old['id'], old)
+            for key in owned_ids[source['id']] - seen:
+                old = dict(jobs_by_id[key])
+                old['missing_scans'] = old.get('missing_scans', 0) + 1
+                old['availability'] = 'closed' if old['missing_scans'] >= 2 else 'missing'
+                record_job(old)
+            flush_jobs()
             store.put('source_health', source['id'], {
                 'id': source['id'], 'status': 'ok', 'checked_at': checked_at,
                 'count': len(jobs), 'message': 'Complete public feed snapshot.', 'url': source['url']})
     # A full search applies preference edits to all stored/imported jobs.
     # A retry leaves jobs owned by sources outside its scope untouched.
-    for job in store.all('jobs'):
+    for job in list(jobs_by_id.values()):
         if scope is not None and job.get('source_id') not in scope:
             continue
-        job.update(match_job(job, profile, config))
-        store.put('jobs', job['id'], job)
-    results['matching_jobs'] = len(ranked_jobs(store, config))
+        updated = dict(job)
+        if _refresh_matching(updated, profile, config, context):
+            record_job(updated)
+    flush_jobs()
+    results['matching_jobs'] = sum(
+        job.get('availability') != 'closed' and bool(job.get('eligible'))
+        and job.get('score', 0) >= config['search']['min_score'] for job in jobs_by_id.values())
     return results
 
 

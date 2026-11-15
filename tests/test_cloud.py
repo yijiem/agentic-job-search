@@ -1,4 +1,5 @@
 import base64
+import fcntl
 import gzip
 import io
 import json
@@ -233,8 +234,7 @@ class CloudHTTPTests(unittest.TestCase):
         document = {'text': text, 'pages': [{'number': 1, 'width': 612, 'height': 792}],
                     'lines': [{'page': 1, 'start': 0, 'end': len(text), 'text': text,
                                'rect': [.1, .1, .8, .05]}]}
-        with patch('jobflow.cloud.remote_enabled', return_value=True), \
-                patch.object(self.server.queue, 'enqueue') as enqueue:
+        with patch.object(self.server.queue, 'enqueue') as enqueue:
             review = action('pdf_review_create', resume_id=resume['id'], job_id='shared-id',
                             document=document)['review']
             original_revision = review['revision']
@@ -258,7 +258,7 @@ class CloudHTTPTests(unittest.TestCase):
             self.assertEqual(review['annotations'][0]['after'], annotation['after'])
             self.assertEqual(review['annotations'][0]['note'], annotation['note'])
             enqueue.assert_not_called()
-            # Saving an actual library version still schedules its reports.
+            # Resume versions do not change preparation inputs either.
             for row in review['annotations']:
                 if row['status'] == 'pending':
                     row['status'] = 'rejected'
@@ -268,12 +268,12 @@ class CloudHTTPTests(unittest.TestCase):
                            text=review['resolved_text'], content_base64=source, label='Reviewed resume',
                            confirmed=True)
             self.assertEqual(saved['review']['status'], 'saved')
-            enqueue.assert_called_once_with(account['id'], 'refresh')
+            enqueue.assert_not_called()
 
     def test_workspace_contention_is_retryable_only_before_execution_begins(self):
         account, unused = self.seed('owner@example.com', 'Owner')
         cookie, csrf, unused = self.login(account['email'])
-        payload = {'action': 'batch', 'op': 'pdf_review_update'}
+        payload = {'action': 'batch', 'op': 'resume_sync'}
         with patch('jobflow.cloud.execution_context') as context, \
                 patch('jobflow.cloud.perform_action') as action:
             context.return_value.__enter__.side_effect = RemoteBusyError('Lease is held')
@@ -298,6 +298,99 @@ class CloudHTTPTests(unittest.TestCase):
             self.assertEqual(body['code'], 'workspace_busy')
             self.assertIs(body['retryable'], True)
             action.assert_not_called()
+
+    def test_foreground_http_edits_commit_while_workspace_and_workflow_locks_are_held(self):
+        account, root = self.seed('owner@example.com', 'Owner')
+        cookie, csrf, unused = self.login(account['email'])
+        store = Store(root / 'data/jobflow.sqlite3')
+        try:
+            store.put('tasks', 'practice', {'id': 'practice', 'title': 'Recorded practice',
+                'status': 'todo', 'minutes': 30, 'due_date': '2026-11-16', 'notes': 'Original note'})
+        finally:
+            store.close()
+
+        def action(payload):
+            status, unused, result = self.request('POST', '/api/action', payload,
+                                                cookie=cookie, csrf=csrf)
+            self.assertEqual(status, 200, result)
+            return result
+
+        # The HTTP handler runs on another thread, and CLI commands run in
+        # separate processes. These real held locks would reject either old
+        # whole-workspace path. A lease acquisition would also fail explicitly.
+        with self.server.account_lock(account['id']), \
+                (root / 'data/workflow.lock').open('a') as workflow_lock, \
+                patch('jobflow.cloud.execution_context',
+                      side_effect=RemoteBusyError('Background workflow owns the lease')) as lease:
+            fcntl.flock(workflow_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            application = action({'action': 'application', 'job_ids': ['shared-id'],
+                                  'stage': 'saved', 'notes': 'Saved during search'})
+            self.assertEqual(application['applications'][0]['notes'], 'Saved during search')
+            self.assertEqual(application['applications'][0]['custom'], {'preserve': 'Owner'})
+            task = action({'action': 'task', 'id': 'practice', 'status': 'done',
+                           'actual_minutes': 25, 'notes': 'Completed during search'})
+            self.assertEqual(task['tasks'][0]['status'], 'done')
+            self.assertEqual(task['tasks'][0]['actual_minutes'], 25)
+            interview = action({'action': 'interview', 'job_id': 'shared-id',
+                                'starts_at': '2026-11-16T10:00:00-08:00', 'round': 'Technical'})
+            self.assertEqual(interview['interviews'][0]['round'], 'Technical')
+            content = base64.b64encode(b'%PDF-1.7\nOriginal resume\n%%EOF\n').decode()
+            resume = action({'action': 'batch', 'op': 'upload_resume',
+                             'filename': 'resume.pdf', 'content_base64': content})['resume']
+            batch = action({'action': 'batch', 'op': 'create', 'name': 'Created during search',
+                            'job_ids': ['shared-id'], 'resume_id': resume['id'],
+                            'applicant': {'first_name': 'Owner', 'last_name': 'Candidate',
+                                          'email': 'owner@example.com'}})['batch']
+            self.assertEqual(batch['name'], 'Created during search')
+            text = 'Owner built an actual Python system.'
+            document = {'text': text, 'pages': [{'number': 1, 'width': 612, 'height': 792}],
+                        'lines': [{'page': 1, 'start': 0, 'end': len(text), 'text': text,
+                                   'rect': [.1, .1, .8, .05]}]}
+            review = action({'action': 'batch', 'op': 'pdf_review_create',
+                             'resume_id': resume['id'], 'job_id': 'shared-id',
+                             'document': document})['review']
+            annotation = {'kind': 'replace', 'start': 0, 'end': len(text), 'before': text,
+                          'after': 'Owner built the documented Python system.', 'note': 'My edit',
+                          'page': 1, 'rects': [[.1, .1, .8, .05]], 'status': 'accepted',
+                          'source': 'manual'}
+            review = action({'action': 'batch', 'op': 'pdf_review_update',
+                             'review_id': review['id'], 'revision': review['revision'],
+                             'annotations': [annotation]})['review']
+            self.assertEqual(review['annotations'][0]['after'], annotation['after'])
+            lease.assert_not_called()
+
+            # Bypassing contention is an allowlist, not a general removal of
+            # workflow serialization for configuration/migration operations.
+            status, unused, blocked = self.request('POST', '/api/action',
+                {'action': 'batch', 'op': 'resume_sync'}, cookie=cookie, csrf=csrf)
+            self.assertEqual(status, 409)
+            self.assertEqual(blocked['code'], 'workspace_busy')
+            lease.assert_not_called()
+
+        store = Store(root / 'data/jobflow.sqlite3')
+        try:
+            self.assertEqual(store.get('applications', 'shared-id')['notes'], 'Saved during search')
+            self.assertEqual(store.get('tasks', 'practice')['notes'], 'Completed during search')
+            self.assertEqual(store.get('interviews', interview['interviews'][0]['id'])['round'], 'Technical')
+            self.assertEqual(store.get('application_batches', batch['id'])['name'], 'Created during search')
+            self.assertEqual(store.get('resume_reviews', review['id'])['annotations'][0]['note'], 'My edit')
+        finally:
+            store.close()
+
+    def test_search_enqueue_bypasses_held_workspace_lock_and_workflow_lease(self):
+        account, root = self.seed('owner@example.com', 'Owner')
+        cookie, csrf, unused = self.login(account['email'])
+        with self.server.account_lock(account['id']), \
+                (root / 'data/workflow.lock').open('a') as workflow_lock, \
+                patch('jobflow.cloud.execution_context',
+                      side_effect=RemoteBusyError('Background workflow owns the lease')) as lease, \
+                patch.object(self.server.queue, 'enqueue', wraps=self.server.queue.enqueue) as enqueue:
+            fcntl.flock(workflow_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            status, unused, result = self.request('POST', '/api/search', {}, cookie=cookie, csrf=csrf)
+            self.assertEqual(status, 200, result)
+            self.assertEqual(result['background_job']['status'], 'pending')
+            enqueue.assert_called_once_with(account['id'], 'run')
+            lease.assert_not_called()
 
     def test_authenticated_dashboard_assets_share_allowlist_and_preserve_binary_types(self):
         self.server.accounts.invite('owner@example.com')

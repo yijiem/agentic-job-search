@@ -40,8 +40,9 @@ async function main(){
     const app=harness(),html=await app.load();
     assert.match(html,/Core resume/);assert.match(html,/taylor@example.com/);assert.match(html,/multiple required/);
     assert.ok(!html.includes('resume-target'));assert.ok(!html.includes('resume-role-search'));assert.ok(!html.includes('id="resume-tailor-form"'),'Tailoring starts from an application, not a standalone role picker');
-    assert.equal(app.writes.length,1);assert.equal(app.writes[0].payload.op,'resume_sync','Opening library only synchronizes existing owned files');
-    assert.equal(app.writes[0].options.headers['X-CSRF-Token'],'private-csrf');
+    assert.equal(app.writes.length,0,'Opening the library is read-only');
+    assert.deepEqual(app.reads,['/api/resumes'],'Navigation needs one library read');
+    assert.match(html,/Restore earlier uploads/);
     assert.ok(!app.writes.some(x=>['create','authorize'].includes(x.payload.op)),'Library never submits applications');
   }
   {
@@ -108,7 +109,10 @@ async function main(){
   }
   {
     const data=snapshot();data.syncError='Another workflow is updating this workspace.';
-    const app=harness(data),html=await app.load();
+    const app=harness(data);await app.load();
+    assert.equal(app.writes.length,0,'A background search cannot turn navigation into a competing mutation');
+    await app.click('restore');const html=app.html();
+    assert.equal(app.writes[0].options.headers['X-CSRF-Token'],'private-csrf');
     assert.match(html,/Saved resume restoration is postponed/);assert.match(html,/Core resume/);assert.match(html,/taylor@example.com/,'A locked migration never hides saved files or application details');
     assert.equal(app.writes[0].payload.workspace_id,'one','Library sync is scoped to the fetched workspace');
     assert.equal(app.reads[0],'/api/resumes','Read identity before migrating account files');

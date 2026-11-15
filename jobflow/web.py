@@ -87,9 +87,10 @@ def _app_build(asset_directory, signature):
 
 
 class WebError(ValueError):
-    def __init__(self, message, status=400):
+    def __init__(self, message, status=400, code=None):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 def _read_records(root, job_mode="matching", minimum=40, job_id=None):
@@ -222,7 +223,16 @@ def snapshot(root):
         cumulative.update(by_day[day])
         history.append({'date': day, 'companies': dict(cumulative), 'total': sum(cumulative.values())})
     result = {kind: records[kind] for kind in ('applications', 'interviews', 'tasks', 'contacts',
-              'research', 'packets', 'plans', 'source_health', 'activities', 'coaching')}
+              'research', 'source_health', 'activities')}
+    # The overview only needs packet membership. Full packet bodies are loaded
+    # with the selected role; preparation already receives its tasks separately.
+    result['packets'] = [{key: packet[key] for key in ('id', 'job_id') if key in packet}
+                         for packet in records['packets']]
+    result['plans'] = []
+    result['coaching'] = []
+    current_plan = next((plan for plan in records['plans'] if plan.get('id') == 'current'), None)
+    plan_summary = ({key: current_plan[key] for key in ('id', 'notes', 'research_notes')
+                     if key in current_plan} if current_plan is not None else None)
     # Account observations have their own allowlisted projection. Do not also
     # expose the raw imported metadata through ordinary research cards.
     result['research'] = [r for r in records['research'] if r.get('kind') not in ('service_context', 'company_location', 'company_location_review')]
@@ -236,7 +246,7 @@ def snapshot(root):
                           'matches': sum(1 for j in jobs if j.get('eligible') and
                                          j.get('score', 0) >= minimum and j.get('availability') != 'closed')},
                   history=history, history_kind='cumulative_first_discoveries',
-                  plan=next((p for p in records['plans'] if p.get('id') == 'current'), None))
+                  plan=plan_summary)
     return result
 
 
@@ -285,13 +295,15 @@ def _run_cli(root, arguments, full_output=False):
         prefix.append('--hosted')
         environment = dict(os.environ)
         environment.pop('OPENAI_API_KEY', None)
-        if remote_workspace:
+        if remote_workspace and arguments[0] != 'action':
             prefix.append('--hosted-interactive')
             environment = lease_environment(root)
             environment.pop('OPENAI_API_KEY', None)
     result = subprocess.run(prefix + arguments,
                             cwd=str(Path(__file__).resolve().parents[1]), capture_output=True,
                             text=True, timeout=180, check=False, env=environment)
+    if result.returncode == 3 and result.stderr.startswith('Conflict: '):
+        raise WebError(result.stderr[len('Conflict: '):].strip(), 409, 'record_conflict')
     if 'Another workflow process is running' in result.stderr:
         raise WebError('A search or another update is running. Wait for it to finish and try again.', 409)
     if result.returncode:
@@ -380,6 +392,9 @@ def perform_action(root, payload):
     """Validate a browser command and dispatch only allowlisted CLI operations."""
     if not isinstance(payload, dict):
         raise WebError('The request must contain a JSON object.')
+    from .foreground import supported
+    if supported(payload):
+        return _json_action(root, payload, 'action')
     action = payload.get('action')
     if action in ('batch', 'agent'):
         if not (Path(root) / 'config/settings.json').exists() or not (Path(root) / 'config/profile.json').exists():
@@ -575,7 +590,10 @@ class JobflowHandler(BaseHTTPRequestHandler):
         self._respond(200, body, content_type, headers)
 
     def _error(self, error):
-        self._respond(error.status if isinstance(error, WebError) else 400, {'error': str(error)})
+        body = {'error': str(error)}
+        if getattr(error, 'code', None):
+            body['code'] = error.code
+        self._respond(error.status if isinstance(error, WebError) else 400, body)
 
     def _resume(self, root, identifier):
         from .application_batches import resume_content
@@ -657,6 +675,10 @@ class JobflowHandler(BaseHTTPRequestHandler):
                 raise WebError('The request is too large or empty.', 413)
             payload = json.loads(self.rfile.read(length))
             validate_action_size(payload, length)
+            from .foreground import supported
+            if supported(payload):
+                self._respond(200, perform_action(self.server.root, payload))
+                return
             if not self.server.action_lock.acquire(blocking=False):
                 raise WebError('Another update is being saved. Please try again shortly.', 409)
             try:
@@ -680,9 +702,19 @@ def serve(root, host='127.0.0.1', port=8765, open_browser=False):
     print('Private workspace: ' + str(Path(root).resolve()), flush=True)
     if open_browser:
         webbrowser.open(url)
+    from .local_refresh import refresh_loop
+    from .remote import workspace_id
+    stop = threading.Event()
+    refresher = None
+    if not workspace_id(server.root):
+        refresher = threading.Thread(target=refresh_loop, args=(server.root, stop), daemon=True)
+        refresher.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print('\nStopped Jobflow.', flush=True)
     finally:
+        stop.set()
+        if refresher is not None:
+            refresher.join(timeout=3)
         server.server_close()

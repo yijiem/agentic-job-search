@@ -58,8 +58,16 @@ async function main() {
     assert.equal(app.renders(),1,'Explicit retry recovers from a failed early request');
   }
   for (const status of [401,409]) {
-    const app=harness();app.respond(async()=>({ok:false,status}));app.bootstrap();app.app();await app.refresh();
+    const app=harness();app.respond(async()=>({ok:false,status,json:async()=>({code:'onboarding_required'})}));app.bootstrap();app.app();await app.refresh();
     assert.deepEqual(app.redirects,['/account']);assert.equal(app.requests.length,1);
+  }
+  {
+    const app=harness();app.respond(async()=>({ok:false,status:409,json:async()=>({code:'workspace_busy',error:'Workspace is updating. Try again shortly.'})}));
+    app.bootstrap();app.app();await app.refresh();
+    assert.deepEqual(app.redirects,[],'A workspace conflict is not an onboarding redirect');
+    assert.match(app.nodes.get('#main').innerHTML,/Try again shortly/);
+    app.respond(async()=>({ok:true,status:200,json:async()=>fixture}));await app.refresh();
+    assert.equal(app.renders(),1,'A busy workspace can recover in place');
   }
   const html=fs.readFileSync(path.join(assets,'index.html'),'utf8');
   assert.match(html,/<script src="\/bootstrap\.js\?v=__JOBFLOW_BUILD__" async>/);

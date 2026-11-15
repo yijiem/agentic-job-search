@@ -80,6 +80,33 @@ async function main(){
     await app.evaluate('pollBackground()');
     assert.equal(app.reads.length,0);
   }
+  {
+    const app=harness(fixture('done'));
+    app.respond(async()=>({ok:true,status:200,json:async()=>({background_job:{status:'pending',id:'new-run'}})}));
+    await app.evaluate('startCloudSearch()');
+    assert.deepEqual(app.reads.map(row=>row.url),['/api/search'],'Enqueuing a search does not fetch the workspace');
+    assert.equal(app.reads[0].options.method,'POST');
+    assert.equal(app.evaluate('state.data.background_job.id'),'new-run');
+    assert.equal(app.stats.renders,0,'Queuing preserves the currently displayed editor');
+    assert.equal([...app.timers.values()].filter(row=>row.delay===15000).length,1);
+  }
+  for (const editor of ['dialog','pdf','resumes','batches','plan']) {
+    const app=harness();
+    if(editor==='dialog')app.evaluate("$('#action-dialog').open=true");
+    else if(editor==='pdf')app.evaluate("$('.pdf-review-dialog').open=true");
+    else if(editor==='plan')app.evaluate('state.agentProposal={job_id:"reviewing"}');
+    else app.evaluate('state.page='+JSON.stringify(editor));
+    app.respond(async url=>({ok:true,status:200,json:async()=>url==='/api/background'?{background_job:{status:'done'}}:fixture('done')}));
+    await app.fire(15000);
+    assert.deepEqual(app.reads.map(row=>row.url),['/api/background'],editor+' defers the full refresh');
+    assert.equal(app.stats.renders,0,'Completion never replaces an active editor');
+    assert.equal(app.evaluate('state.workspaceRefreshPending'),true);
+    assert.equal([...app.timers.values()].filter(row=>row.delay===15000).length,0,'Completed work stops polling even while edits are open');
+    app.evaluate("$('#action-dialog').open=false;$('.pdf-review-dialog').open=false;state.page='jobs';state.agentProposal=null");
+    await app.evaluate('flushWorkspaceUpdates()');
+    assert.deepEqual(app.reads.map(row=>row.url),['/api/background','/api/state']);
+    assert.equal(app.stats.renders,1,'Deferred data refreshes after the editor is left');
+  }
   console.log('Background queue polling UI checks passed.');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

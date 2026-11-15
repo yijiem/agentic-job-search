@@ -3,6 +3,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import time
 import shutil
 import sys
 from contextlib import nullcontext
@@ -39,6 +40,8 @@ def parser():
     batch_input.add_argument('--request', type=Path, help='JSON batch action request file; use - for stdin')
     batch_input.add_argument('--codex-run', help='Read and connect to a prepared Codex run')
     batch.add_argument('--worker-id', help='Unique runner ID to retain throughout the Codex run')
+    action = commands.add_parser('action', help='Save an interactive edit without waiting for a search')
+    action.add_argument('--request', type=Path, required=True, help='Bounded JSON user action')
     agent = commands.add_parser('agent', help='Preview or apply an evidence-grounded preparation plan')
     agent.add_argument('--request', type=Path, required=True, help='JSON planning request file')
     for name in ('run', 'search', 'personalize', 'prep', 'discover'):
@@ -403,6 +406,40 @@ def main(argv=None):
                 shutil.copyfile(args.root / 'config' / (name + '.example.json'), destination)
         Store(args.root / 'data/jobflow.sqlite3').close()
         print('Initialized. Review config/profile.json and config/settings.json, then run python3 -m jobflow run.')
+        return
+    if args.command == 'action':
+        from .foreground import perform, supported
+        from .storage import RecordConflictError
+        try:
+            if args.request.stat().st_size > 8 * 1024 * 1024:
+                raise ValueError('The action request is too large.')
+            payload = json.loads(args.request.read_text(encoding='utf-8'))
+            if not supported(payload):
+                raise ValueError('This operation requires the normal workflow command.')
+            config, profile = load_config(args.root)
+            if args.hosted:
+                config = {**config, 'research': {**config.get('research', {}), 'enabled': False}}
+            # Retry only a proven atomic compare-and-set rejection. Transport
+            # failures may follow a commit and must never replay a creation.
+            for attempt in range(3):
+                current = Store(args.root / 'data/jobflow.sqlite3')
+                try:
+                    with current.optimistic():
+                        result = perform(args.root, current, config, profile, payload)
+                    print(json.dumps(result, ensure_ascii=False))
+                    return
+                except RecordConflictError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
+                finally:
+                    current.close()
+        except RecordConflictError as error:
+            print('Conflict: ' + str(error), file=sys.stderr)
+            raise SystemExit(3)
+        except (ValueError, OSError, RuntimeError, KeyError) as error:
+            print('Error: ' + str(error), file=sys.stderr)
+            raise SystemExit(1)
         return
     (args.root / 'data').mkdir(parents=True, exist_ok=True)
     store = None

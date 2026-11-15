@@ -201,19 +201,10 @@
     return `<div class="page-header"><div><h1>Application batches</h1><p>Group roles, choose materials, and follow applications with Codex.</p></div><div class="header-actions">${button('Create a batch','new','',true)}</div></div><div id="batch-live-message" class="batch-live-message" role="status" aria-live="polite">${escape(ui.notice)}</div>${ui.error?`<div class="batch-warning" role="alert">${escape(ui.error)} ${button('Try again','reload')}</div>`:''}${body}`;
   }
   function resetHandoffReview() {ui.handoffReview=null;}
-  async function load(force=false,sync=false) {
+  async function load(force=false) {
     if(ui.loading)return;
     ui.loading=true;
     try {
-      let syncError='';
-      if(sync){
-        try{
-          const scopeResponse=await fetch('/api/batches',{cache:'no-store'}),scope=await scopeResponse.json();
-          if(!scopeResponse.ok)throw new Error(scope.error||'Could not read this workspace.');
-          const migrated=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':scope.csrf_token||ui.runtime?.csrfToken||''},body:JSON.stringify({action:'batch',op:'resume_sync',workspace_id:scope.workspace_id})});
-          const migration=await migrated.json();if(!migrated.ok||migration.error)throw new Error(migration.error||'Try refreshing shortly.');
-        }catch(error){syncError='Saved resume restoration is postponed. '+error.message;}
-      }
       const response=await fetch('/api/batches',{cache:'no-store'}),data=await response.json();
       if(!response.ok)throw new Error(data.error||'Could not load application batches.');
       const old=getBatch(),changed=contentFingerprint(ui.data)!==contentFingerprint(data);
@@ -228,7 +219,7 @@
       const current=getBatch();
       if(old&&current&&old.revision!==current.revision)resetHandoffReview();
       if(!force&&old&&current&&JSON.stringify(old)!==JSON.stringify(current))ui.notice=hasEdits()?'Progress refreshed. Your unsaved answers are retained.':'Application progress updated.';
-      ui.error=syncError;
+      ui.error='';
       if(force||(changed&&!hasEdits()))draw();
       else {updateCodexProgress();if(changed){const message=document.querySelector('#batch-live-message');if(message)message.textContent=ui.notice||'Progress refreshed. Your unsaved answers are retained.';}}
     } catch(error){ui.error=error.message;if(force||!ui.data)draw();}
@@ -392,7 +383,7 @@
     if(op==='clear-tailored'&&ui.draft){delete ui.draft.resumeOverrides?.[node.dataset.jobId];ui.draft.dirty=true;draw();return;}
     if(op==='new'){ui.creating=true;if(!ui.draft){ui.seed=[...(ui.workspace?.selected||[])];ui.draft=newDraft();}draw();return;}
     if(op==='close-create'){ui.creating=false;draw();return;}
-    if(op==='reload'){await load(true,true);return;}
+    if(op==='reload'){await load(true);return;}
     if(op==='codex-review'&&batch){reviewCodex(batch);return;}
     if(op==='codex-prepare'&&batch){
       const review=ui.handoffReview;
@@ -450,7 +441,7 @@
     if(!shouldPoll())return;
     ui.timer=setTimeout(async()=>{ui.timer=null;if(!shouldPoll()){if(ui.active&&hostedWorkspace())updateCodexProgress();return;}await (hostedWorkspace()?loadHostedProgress():load());schedule();},hostedWorkspace()?10000:5000);
   }
-  function mount(runtime) {ui.runtime=runtime;const wasActive=ui.active;ui.active=true;restoreFocus();if(!wasActive){load(true,true);schedule();}}
+  function mount(runtime) {ui.runtime=runtime;const wasActive=ui.active;ui.active=true;restoreFocus();if(!wasActive){load(true);schedule();}}
   function unmount() {ui.active=false;clearTimeout(ui.timer);ui.timer=null;}
   function retainingBatch(jobId) {
     return [...(ui.data?.batches||[])].reverse().find(batch=>(batch.items||[]).some(item=>item.job_id===jobId&&item.status!=='skipped'&&(batch.status!=='cancelled'||['submitting','submitted','uncertain'].includes(item.status))));

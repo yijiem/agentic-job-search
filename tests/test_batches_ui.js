@@ -54,7 +54,7 @@ async function main(){
     assert.match(app.api.render(hosted).match(/<section class="batch-codex-actions"[\s\S]*?<\/section>/)?.[0]||'',/Use the local workspace for Codex/,'Unavailable reason appears beside the disabled control');
     const before=app.reads.length;
     await app.listeners.click(batchClick('reload'));
-    assert.equal(app.reads.length,before+2,'Explicit refresh still restores resumes and reads the current hosted batch');
+    assert.equal(app.reads.length,before+1,'Explicit refresh reads the current hosted batch without a restoration write');
     const review={dataset:{batchReview:'one'}};
     app.listeners.input({target:{dataset:{batchAnswer:'work',answerType:'select'},value:'No',closest(selector){return selector==='[data-batch-review]'?review:null;},hasAttribute(){return false;}},type:'input'});
     data.batches[0].revision++;
@@ -505,8 +505,8 @@ async function main(){
     const data=snapshot();data.default_resume_id='resume-default';data.resumes.push({id:'resume-default',filename:'Default.docx',label:'Saved default',size:2048});data.applicant={first_name:'Saved',last_name:'Candidate',email:'saved@example.com'};
     const app=harness(data);app.api.start(['five']);let html=await app.load(workspace);
     assert.match(html,/value="resume-default" selected/);assert.match(html,/value="saved@example.com"/);
-    assert.equal(app.maintenanceWrites.length,1,'Opening batches synchronizes existing resume files once');
-    assert.equal(app.maintenanceWrites[0].op,'resume_sync');
+    assert.equal(app.maintenanceWrites.length,0,'Opening batches never writes resume metadata');
+    assert.deepEqual(app.reads,['/api/batches'],'Navigation reads the batch library once');
     const form={id:'application-batch-create',dataset:{}};
     app.listeners.input({target:{dataset:{batchApplicant:'email'},value:'edited@example.com',closest(selector){return selector==='#application-batch-create'?form:null;},hasAttribute(){return false;}},type:'input'});
     data.applicant.email='new-default@example.com';
@@ -518,8 +518,8 @@ async function main(){
   {
     const data=snapshot();data.syncError='Another workflow is updating this workspace.';
     const app=harness(data),html=await app.load(workspace);
-    assert.match(html,/Saved resume restoration is postponed/);assert.match(html,/Reviewed roles/);assert.match(html,/Resume.pdf/,'A locked restoration leaves existing batches and resumes readable');
-    assert.equal(app.maintenanceWrites[0].workspace_id,'workspace','Restoration uses the freshly read workspace');
+    assert.ok(!html.includes('Saved resume restoration is postponed'));assert.match(html,/Reviewed roles/);assert.match(html,/Resume.pdf/,'Navigation leaves existing batches and resumes readable');
+    assert.equal(app.maintenanceWrites.length,0,'Reading batches never attempts a competing restoration');
   }
   {
     const data=snapshot();data.batches=[];data.applicant={first_name:'Test',last_name:'Candidate',email:'test@example.com'};

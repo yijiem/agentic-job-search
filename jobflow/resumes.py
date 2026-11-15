@@ -28,6 +28,10 @@ PROFILE_ID = 'default'
 
 def _records(root, kinds):
     result = {kind: [] for kind in kinds}
+    from .record_concurrency import optimistic_store
+    active = optimistic_store(root)
+    if active is not None:
+        return {kind: active.all(kind) for kind in kinds}
     from .remote_files import is_remote_root
     if is_remote_root(root):
         from .storage import Store

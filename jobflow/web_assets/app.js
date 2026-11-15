@@ -28,6 +28,9 @@ const stages = ['saved','applied','recruiter','technical','onsite','offer','reje
 const stageLabels = {saved:'Saved',applied:'Applied',recruiter:'Recruiter screen',technical:'Technical',onsite:'Onsite',offer:'Offer',rejected:'Rejected',withdrawn:'Withdrawn'};
 const colors = ['#72b9a9','#d5bc78','#8ca9c1','#a5b796','#b7a0c3'];
 const state = {data:null, page:'overview', filters:{q:'',company:'',score:'',availability:'active',location:'',sort:'score'}, selected:new Set(),pageIndex:0,inboxDate:'',prepJob:'',contactCompany:'',contactJob:'saved',city:'',detail:null,detailTab:'overview',busy:false};
+state.pendingActions = new Set();
+state.mutationVersion = 0;
+state.refreshSequence = 0;
 state.rolesView = 'companies';
 state.roleCompany = '';
 state.companySort = 'roles';
@@ -60,7 +63,25 @@ const dueApps = () => applications().filter(a=>a.follow_up_date && a.follow_up_d
 const pendingTasks = () => (state.data?.tasks || []).filter(t=>['todo','doing'].includes(t.status));
 function toast(message,error=false) { const node=$('#toast');node.textContent=message;node.className='toast visible'+(error?' error':'');clearTimeout(state.toastTimer);state.toastTimer=setTimeout(()=>node.classList.remove('visible'),5000); }
 function setData(data) { state.agentProposal=null; resetPrepGuide(); state.data=data; state.jobMap=new Map((data.jobs||[]).map(j=>[j.id,j]));state.appMap=new Map((data.applications||[]).map(a=>[a.job_id||a.id,a])); if(!state.inboxDate)state.inboxDate=data.today; noticeAppBuild(data.app_build); updateHostedChrome(); }
-async function refresh(showNotice=false) {
+function workspaceEditorOpen() {
+  return Boolean($('#action-dialog')?.open || $('.pdf-review-dialog')?.open ||
+    ['resumes','batches'].includes(state.page) || state.agentLoading || state.agentProposal);
+}
+function flushWorkspaceUpdates() {
+  if (workspaceEditorOpen()) return;
+  if (state.workspaceRenderPending) {state.workspaceRenderPending=false;render();}
+  if (state.pendingActions.size) return;
+  if (state.workspaceRefreshPending) {
+    state.workspaceRefreshPending = false;
+    return refresh(false, {preserveEdits:true});
+  }
+}
+async function refresh(showNotice=false, {preserveEdits=false}={}) {
+  if (preserveEdits && (workspaceEditorOpen() || state.pendingActions.size)) {
+    state.workspaceRefreshPending = true;
+    return;
+  }
+  const sequence=++state.refreshSequence, mutationVersion=state.mutationVersion;
   // The async bootstrap can arrive before or after app.js. Claim its response
   // once and prevent a late bootstrap from starting a duplicate workspace read.
   window.JobflowStateStarted = true;
@@ -70,9 +91,18 @@ async function refresh(showNotice=false) {
     const pending = initial ? await initial : null;
     if (pending?.error) throw pending.error;
     const response = pending?.response || await fetch('/api/state', {cache:'no-store'});
-    if (response.status === 401 || response.status === 409) {location.assign('/account');return;}
-    if (!response.ok) throw new Error('Unable to read your workspace.');
-    setData(await response.json());
+    if (response.status === 401) {location.assign('/account');return;}
+    const data = await response.json();
+    if (response.status === 409 && data.code === 'onboarding_required') {location.assign('/account');return;}
+    if (!response.ok) throw new Error(data.error || 'Unable to read your workspace.');
+    if (sequence !== state.refreshSequence) return;
+    if (mutationVersion !== state.mutationVersion || state.pendingActions.size || (preserveEdits && workspaceEditorOpen())) {
+      state.workspaceRefreshPending = true;
+      return flushWorkspaceUpdates();
+    }
+    state.workspaceRefreshPending = false;
+    state.workspaceRenderPending = false;
+    setData(data);
     render();
     if (showNotice) toast('Workspace refreshed.');
   } catch (error) {
@@ -80,7 +110,70 @@ async function refresh(showNotice=false) {
     else toast(error.message,true);
   }
 }
-async function mutate(payload, message='Workspace updated.') { if(state.busy)return false;state.busy=true;document.querySelectorAll('.action-dialog button[type="submit"]').forEach(b=>b.disabled=true);try { const batches=payload.action==='application'&&payload.job_ids?.length>100?Array.from({length:Math.ceil(payload.job_ids.length/100)},(_,i)=>({...payload,job_ids:payload.job_ids.slice(i*100,(i+1)*100)})):[payload];let completed=0,skipped=0;for(const batch of batches){const response=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.data.csrf_token},body:JSON.stringify(batch)});const result=await response.json();if(!response.ok||result.error)throw new Error((completed?`${completed} records updated before the error. `:'')+(result.error||result.message||'The update could not be saved.'));completed+=Number(result.updated||0);skipped+=Number(result.skipped||0);}await refresh();toast(message+(skipped?` ${skipped} existing application stage${skipped===1?' was':'s were'} preserved.`:''));return true;}catch(error){toast(error.message,true);const el=$('#form-error');if(el)el.textContent=error.message;return false;}finally{state.busy=false;document.querySelectorAll('.action-dialog button[type="submit"]').forEach(b=>b.disabled=false);} }
+function actionKeys(payload) {
+  if (payload.action === 'application') return (payload.job_ids || []).map(id=>'application:'+id);
+  if (payload.action === 'personalize') return (payload.job_ids || []).map(id=>'packet:'+id);
+  return [payload.action+':'+(payload.id || payload.job_id || 'workspace')];
+}
+function mergeApplicationRecords(rows) {
+  const records=new Map(applications().map(row=>[row.job_id||row.id,row]));
+  for (const row of rows) {
+    const id=row.job_id||row.id;
+    if (!id) continue;
+    records.set(id,row);
+    if (state.detail?.job?.id===id) state.detail.application=row;
+  }
+  state.data.applications=[...records.values()];
+  state.appMap=records;
+  state.workspaceRenderPending=true;
+}
+function mergeWorkspaceRecords(kind, rows) {
+  const records=new Map((state.data[kind]||[]).map(row=>[row.id,row]));
+  for (const row of rows) if(row.id)records.set(row.id,row);
+  state.data[kind]=[...records.values()];
+  state.workspaceRenderPending=true;
+}
+async function mutate(payload, message='Workspace updated.', form=null) {
+  const keys=actionKeys(payload);
+  if (keys.some(key=>state.pendingActions.has(key))) {toast('This change is already being saved.');return false;}
+  keys.forEach(key=>state.pendingActions.add(key));
+  state.mutationVersion++;
+  const buttons=Array.from(form?.querySelectorAll?.('button[type="submit"]') || []);
+  buttons.forEach(button=>button.disabled=true);
+  try {
+    const batches=payload.action==='application'&&payload.job_ids?.length>100
+      ? Array.from({length:Math.ceil(payload.job_ids.length/100)},(_,i)=>({...payload,job_ids:payload.job_ids.slice(i*100,(i+1)*100)})) : [payload];
+    let completed=0,skipped=0;
+    for (const batch of batches) {
+      const response=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.data.csrf_token},body:JSON.stringify(batch)});
+      const result=await response.json();
+      if (!response.ok || result.error) throw new Error((completed?`${completed} records updated before the error. `:'')+(result.error||result.message||'The update could not be saved.'));
+      completed+=Number(result.updated||0);skipped+=Number(result.skipped||0);
+      if (payload.action==='application' && Array.isArray(result.applications)) mergeApplicationRecords(result.applications);
+      else if (payload.action==='task' && Array.isArray(result.tasks)) mergeWorkspaceRecords('tasks',result.tasks);
+      else if (payload.action==='interview' && Array.isArray(result.interviews)) mergeWorkspaceRecords('interviews',result.interviews);
+      else state.workspaceRefreshPending=true;
+      if (Object.prototype.hasOwnProperty.call(result,'background_job')) {
+        state.data.background_job=result.background_job;
+        updateHostedChrome();
+      }
+    }
+    toast(message+(skipped?` ${skipped} existing application stage${skipped===1?' was':'s were'} preserved.`:''));
+    return true;
+  } catch (error) {
+    toast(error.message,true);
+    const el=form?.querySelector?.('[role="alert"]') || (form?.isConnected ? $('#form-error') : null);
+    if(el)el.textContent=error.message;
+    return false;
+  } finally {
+    keys.forEach(key=>state.pendingActions.delete(key));
+    state.mutationVersion++;
+    buttons.forEach(button=>button.disabled=false);
+    // The durable write is complete. Derived data may refresh independently;
+    // neither another record's save nor an open editor waits for that read.
+    flushWorkspaceUpdates();
+  }
+}
 function updateHostedChrome() {
   const hosted = Boolean(state.data?.account?.hosted);
   const accountLink = $('#account-link'), searchButton = $('#cloud-search');
@@ -104,7 +197,7 @@ async function pollBackground() {
     const result = await response.json();
     state.data.background_job = result.background_job;
     if (result.background_job && ['pending','running'].includes(result.background_job.status)) updateHostedChrome();
-    else await refresh();
+    else {updateHostedChrome();await refresh(false, {preserveEdits:true});}
   } catch {
     state.backgroundTimer = setTimeout(pollBackground, 30000);
   }
@@ -118,7 +211,8 @@ async function startCloudSearch() {
     if (response.status === 401) { location.assign('/account'); return; }
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'The search could not be queued.');
-    await refresh();
+    state.data.background_job = result.background_job;
+    updateHostedChrome();
   } catch (error) { toast(error.message, true); }
   finally { button.disabled = false; }
 }
@@ -149,7 +243,7 @@ async function checkAppVersion() {
   } catch { /* A later focus or periodic check can retry without disrupting work. */ }
 }
 function reloadApp() {
-  if (state.busy || $('#action-dialog')?.open || $('.pdf-review-dialog')?.open) {toast('Save or close your open edit before reloading.'); return;}
+  if (state.pendingActions.size || state.agentLoading || $('#action-dialog')?.open || $('.pdf-review-dialog')?.open) {toast('Save or close your open edit before reloading.'); return;}
   location.reload();
 }
 function navigate(page, filters) { if(filters){state.filters={...state.filters,...filters};if(page==='jobs'&&filters.company!==undefined)state.roleCompany=filters.company;}state.pageIndex=0;const hash=routeHash(page);if(location.hash===hash){state.page=page;render();}else location.hash=hash; }
@@ -644,8 +738,7 @@ function renderRoleGuide(choices) {
   return `<section class="card prep-guide"><div class="card-head"><div><div class="eyebrow">ROLE & COMPANY GUIDE</div><h2>${esc(guide.company)} · ${esc(guide.title)}</h2><p>${esc(guide.summary)}</p></div>${button('View role',`data-job="${esc(state.prepJob)}"`,'small')}</div><div class="card-body"><div class="skill-chips">${(guide.focus || []).map(topic => `<span class="chip green">${esc(topic)}</span>`).join('')}</div><div class="prep-guide-layout"><div><h3 class="prep-guide-heading">What to work on</h3><p class="prep-guide-caption">Use these suggestions within your daily practice blocks. They do not add time to your schedule.</p><div class="prep-guide-steps">${(guide.steps || []).map((step,index) => `<details class="prep-guide-step" ${index === 0 ? 'open' : ''}><summary><span class="prep-step-number">${index + 1}</span><span>${esc(step.title)}<small>${esc(String(step.category || 'Practice').replaceAll('_',' '))} · ${esc(step.minutes)} min suggested</small>${step.why_chosen ? `<span class="prep-step-rationale"><strong>Why this exercise</strong>${esc(step.why_chosen)}</span>` : ''}</span></summary><p>${esc(step.prompt)}</p>${roleEvidence(step.role_evidence)}</details>`).join('')}</div></div><aside class="prep-process"><h3 class="prep-guide-heading">Company interview guidance</h3><p>${esc(process.text || 'The company’s interview process has not been verified.')}</p>${process.observed_at ? `<p class="note-source">Guidance observed ${esc(prettyDate(process.observed_at,{year:'numeric'}))}. Confirm the current format when an interview is arranged.</p>` : ''}<ul class="source-list">${(process.sources || []).map(source => `<li>${external(source.url, source.title || source.url)} ↗</li>`).join('')}</ul><p class="prep-guide-caption">${esc(guide.disclaimer || 'Suggested exercises are original practice, not reported employer interview questions.')}</p></aside></div>${renderLeetCode(guide)}</div></section>`;
 }
 async function previewAgentPlan() {
-  if (state.busy) return;
-  state.busy = true;
+  if (state.agentLoading || state.pendingActions.has('agent:'+(state.prepJob||'workspace'))) return;
   state.agentLoading = true;
   state.agentProposal = null;
   state.agentError = '';
@@ -657,13 +750,14 @@ async function previewAgentPlan() {
     if (!response.ok || result.error || !result.proposal) throw new Error(result.error || 'Your plan could not be prepared.');
     if (state.prepJob === requestedJob) state.agentProposal = result.proposal;
   } catch (error) { state.agentError=error.message; toast(error.message, true); }
-  finally { state.busy=false; state.agentLoading=false; render(); }
+  finally { state.agentLoading=false; render();flushWorkspaceUpdates(); }
 }
 async function applyAgentPlan() {
   const proposal = state.agentProposal;
-  if (!proposal || state.busy) return;
+  if (!proposal || state.agentLoading) return;
   const ok = await mutate({action:'agent',operation:'apply',job_id:proposal.job_id,fingerprint:proposal.fingerprint}, 'Reviewed preparation plan saved.');
-  if (!ok) {state.agentProposal=null;state.agentError='The plan was not confirmed as saved. Generate a fresh preview to review the current workspace before trying again.';render();}
+  if (ok) {state.agentProposal=null;flushWorkspaceUpdates();}
+  else {state.agentProposal=null;state.agentError='The plan was not confirmed as saved. Generate a fresh preview to review the current workspace before trying again.';render();}
 }
 function renderAgentPlanner() {
   if (state.agentLoading) return '<section class="card prep-agent-card" role="status"><h2>Planning your next steps…</h2><p>Checking your recorded role context, upcoming interviews, existing practice, and available time.</p></section>';
@@ -788,7 +882,7 @@ document.addEventListener('click',async event=>{const el=event.target.closest('[
     case 'retry-prep-guide':loadPrepGuide(state.prepJob,true);render();break;
     case 'rebuild-prep':case 'agent-preview':await previewAgentPlan();break;
     case 'agent-apply':await applyAgentPlan();break;
-    case 'agent-dismiss':state.agentProposal=null;render();break;
+    case 'agent-dismiss':state.agentProposal=null;render();flushWorkspaceUpdates();break;
   }
 });
 document.addEventListener('change',event=>{const el=event.target;if(el.id==='company-sort'){if(!['roles','score','average','strong'].includes(el.value))return;state.companySort=el.value;render();$('#company-sort')?.focus();}else if(el.matches('[data-filter]')){clearTimeout(state.searchTimer);state.filters[el.dataset.filter]=el.value;state.pageIndex=0;render();}else if(el.matches('[data-select]')){el.checked?state.selected.add(el.dataset.select):state.selected.delete(el.dataset.select);const previous=$('.selection-bar');if(previous)previous.remove();$('#main').insertAdjacentHTML('beforeend',selectionBar());const all=$('#select-page');if(all)all.checked=state.visibleJobs.every(j=>state.selected.has(j.id));}else if(el.id==='select-page'){state.visibleJobs.forEach(j=>el.checked?state.selected.add(j.id):state.selected.delete(j.id));render();}else if(el.id==='inbox-date'){state.inboxDate=el.value||today();state.pageIndex=0;render();}else if(el.id==='prep-job'){state.agentProposal=null;resetPrepGuide();state.prepJob=el.value;navigate('prep');}else if(el.id==='contact-company'){state.contactCompany=el.value;render();}else if(el.id==='contact-role'){state.contactJob=el.value;render();}else if(el.id==='map-company-filter'){state.mapCompany=el.value;state.mapSelectedCompany='';state.mapOfficeId='';state.city='';render();}else if(el.id==='map-score-filter'){state.mapScore=el.value;state.mapSelectedCompany='';state.mapOfficeId='';state.city='';render();}});
@@ -796,12 +890,12 @@ document.addEventListener('input',event=>{const el=event.target;if(el.id==='map-
 document.addEventListener('toggle',event=>{if(event.target.matches?.('.map-company-group')){state.mapGroupOpen ||= new Map();state.mapGroupOpen.set(mapGroupKey(event.target.dataset.mapGroup),event.target.open);}},true);
 document.addEventListener('error',event=>{const img=event.target;if(img.matches?.('.company-logo img')){img.hidden=true;img.parentElement.classList.remove('has-image');}},true);
 document.addEventListener('keydown',event=>{const marker=event.target.closest('.map-marker');if(marker&&['Enter',' '].includes(event.key)){event.preventDefault();state.city=marker.dataset.city;navigate('analytics');}});
-document.addEventListener('submit',async event=>{const form=event.target;if(!['tracking-form','task-form','interview-form','batch-form'].includes(form.id))return;event.preventDefault();if(state.busy)return;const values=Object.fromEntries(new FormData(form));let payload,message;
+document.addEventListener('submit',async event=>{const form=event.target;if(!['tracking-form','task-form','interview-form','batch-form'].includes(form.id))return;event.preventDefault();const values=Object.fromEntries(new FormData(form));let payload,message;
   if(form.id==='tracking-form'){payload={action:'application',job_ids:[form.dataset.id],...values};message='Application progress saved.';}
   else if(form.id==='task-form'){payload={action:'task',id:form.dataset.id,status:values.status,notes:values.notes};const currentTask=(state.data.tasks||[]).find(t=>t.id===form.dataset.id);if(values.status!=='unscheduled'||currentTask?.due_date)payload.due_date=values.due_date;if(values.actual_minutes!=='')payload.actual_minutes=Number(values.actual_minutes);message='Practice progress saved.';}
   else if(form.id==='interview-form'){payload={action:'interview',...values,starts_at:new Date(values.starts_at).toISOString()};message='Interview recorded and preparation schedule updated.';}
   else{if(values.confirmed!=='on')return;payload={action:'application',job_ids:[...state.selected],stage:'applied'};message='Completed submissions recorded.';}
-  const ok=await mutate(payload,message);if(ok){$('#action-dialog').close();if(state.detail&&form.id==='tracking-form'){state.detail.application=appById(form.dataset.id);renderDetail();}}
+  const ok=await mutate(payload,message,form);if(ok&&form.isConnected!==false){$('#action-dialog').close();if(state.detail&&form.id==='tracking-form'){state.detail.application=appById(form.dataset.id);renderDetail();}}
 });
 function setMenuOpen(open) {
   $('.sidebar').classList.toggle('open', open);
@@ -810,7 +904,8 @@ function setMenuOpen(open) {
 $('#refresh').addEventListener('click',()=>refresh(true));
 $('#menu-toggle').addEventListener('click',()=>setMenuOpen(!$('.sidebar').classList.contains('open')));
 document.addEventListener('click',event=>{if(!event.target.closest('.sidebar,#menu-toggle'))setMenuOpen(false);});
-window.addEventListener('hashchange',()=>{applyRoute();state.pageIndex=0;setMenuOpen(false);render();if(state.page==='analytics'&&state.focusMap){$('.analytics-location-grid')?.scrollIntoView?.({block:'start'});}else window.scrollTo(0,0);state.focusMap=false;});
+window.addEventListener('hashchange',()=>{applyRoute();state.pageIndex=0;setMenuOpen(false);render();flushWorkspaceUpdates();if(state.page==='analytics'&&state.focusMap){$('.analytics-location-grid')?.scrollIntoView?.({block:'start'});}else window.scrollTo(0,0);state.focusMap=false;});
+document.addEventListener('close',flushWorkspaceUpdates,true);
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
 // Bootstrap browser session.
 applyRoute();

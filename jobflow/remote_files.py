@@ -182,8 +182,12 @@ def persist_file(root, path):
     path = _path(root, relative)
     if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
         raise ValueError('Private file is missing or exceeds the supported size.')
-    token = token_for(root)
-    if not token:
+    from .record_concurrency import optimistic_store
+    foreground = optimistic_store(root)
+    if foreground is not None and not re.fullmatch(r'inputs/application-resumes/resume-[a-f0-9]{32}', relative):
+        raise ValueError('Interactive file writes must create an immutable resume version.')
+    token = None if foreground is not None else token_for(root)
+    if foreground is None and not token:
         raise ValueError('A workspace lease is required to save private files.')
     digest, size = _sha(path), path.stat().st_size
     previous = client.rpc('jobflow_file_get', {'p_workspace': identifier, 'p_path': relative})
@@ -198,11 +202,17 @@ def persist_file(root, path):
     object_key = identifier + '/' + digest + ('.gz' if encoding == 'gzip' else '')
     if len(content) > MAX_STORED_BYTES:
         raise ValueError('Private file exceeds the free storage upload limit after compression.')
-    client.rpc('jobflow_file_stage', {'p_workspace': identifier, 'p_token': token,
-                                     'p_object_key': object_key})
+    if foreground is not None:
+        client.rpc('jobflow_foreground_file_stage', {'p_workspace': identifier, 'p_object_key': object_key})
+    else:
+        client.rpc('jobflow_file_stage', {'p_workspace': identifier, 'p_token': token,
+                                         'p_object_key': object_key})
     client.storage_upload(BUCKET, object_key, content, content_type='application/octet-stream')
     metadata = {'path': relative, 'object_key': object_key, 'sha256': digest,
                 'size': size, 'stored_size': len(content), 'encoding': encoding}
+    if foreground is not None:
+        foreground.stage_file(metadata)
+        return metadata
     return client.rpc('jobflow_file_put', {'p_workspace': identifier, 'p_token': token, 'p_file': metadata})
 
 
@@ -224,7 +234,7 @@ def persist_path(path):
     return persist_file(root, path) if root else None
 
 
-def hydrate_workspace(root):
+def hydrate_workspace(root, uploads=True):
     """Fetch small configuration/metadata, leaving resume and report bodies lazy."""
     if not is_remote_root(root):
         return
@@ -233,7 +243,8 @@ def hydrate_workspace(root):
     config = {row['path']: row for row in file_manifest(root, 'config/')}
     for relative in CONFIG_FILES:
         ensure_file(root, relative, metadata=config.get(relative))
-    hydrate_upload_metadata(root)
+    if uploads:
+        hydrate_upload_metadata(root)
 
 
 def hydrate_upload_metadata(root):

@@ -4,8 +4,10 @@ from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from copy import deepcopy
 
 from .remote import RemoteError, RemoteResponseTooLarge, client_from_env, token_for, workspace_id
+from .record_concurrency import RecordTransactions, RecordConflictError, INGESTION_KINDS
 
 
 PAGE_SIZE = 200
@@ -43,9 +45,10 @@ def _row_batches(rows, parse_body=False):
         yield batch
 
 
-class RemoteStore:
+class RemoteStore(RecordTransactions):
     def __init__(self, path, client=None):
         self.root = Path(path).parent.parent
+        self._init_transactions()
         self.workspace = workspace_id(self.root, required=True)
         self.client = client or client_from_env()
         self._cache = {}
@@ -63,13 +66,16 @@ class RemoteStore:
 
     def get(self, kind, key):
         key = str(key)
+        pending = self._pending_value(kind, key)
+        if pending is not None:
+            return deepcopy(pending['body'])
         cached = self._cache.get(kind, {})
         if key in cached or kind in self._complete:
-            return cached.get(key)
+            return deepcopy(self._observe(kind, key, cached.get(key)))
         value = self.client.rpc('jobflow_record_get', self._params(p_kind=kind, p_id=key))
-        if self._batch_depth:
+        if self._batch_depth or self._optimistic_depth:
             self._cache.setdefault(kind, {})[key] = value
-        return value
+        return deepcopy(self._observe(kind, key, value))
 
     def iter_rows(self, kind=None, mode='all', minimum=40, job_id=None):
         self.flush()
@@ -78,7 +84,10 @@ class RemoteStore:
         while True:
             response = self.client.rpc('jobflow_records_page', self._params(
                 p_kind=kind, p_mode=mode, p_minimum=minimum, p_job=job_id,
-                p_limit=PAGE_SIZE, p_revision=revision, **cursor))
+                # Foreground commit validates the complete shared-record read
+                # set and collection IDs. Ingestion's unrelated global revision
+                # must not make an interactive paginated read unavailable.
+                p_limit=PAGE_SIZE, p_revision=None if self._optimistic_depth else revision, **cursor))
             if not isinstance(response, dict) or not isinstance(response.get('records'), list):
                 raise RemoteError('The private record response is invalid.')
             if response.get('conflict'):
@@ -94,20 +103,26 @@ class RemoteStore:
 
     def all(self, kind):
         if kind in self._complete:
-            return list(self._cache[kind].values())
+            result = deepcopy(list(self._cache[kind].values()))
+            self._observe_all(kind, result)
+            return self._overlay(kind, result)
         result = [row['body'] for row in self.iter_rows(kind)]
-        if self._batch_depth:
+        if self._batch_depth or self._optimistic_depth:
             self._cache[kind] = {str(row['id']): row for row in result}
             self._complete.add(kind)
-        return result
+        self._observe_all(kind, result)
+        return self._overlay(kind, deepcopy(result))
 
     def all_projected_jobs(self):
         return [row['body'] for row in self.iter_rows('jobs', mode='projected')]
 
     def put(self, kind, key, value):
+        if self._optimistic_depth:
+            return self._stage(kind, key, value)
         now = _now()
-        row = {'kind': kind, 'id': str(key), 'body': value,
+        row = {'kind': kind, 'id': str(key), 'body': deepcopy(value),
                'created_at': now, 'updated_at': now}
+        self._observe_writes([row])
         if self._batch_depth:
             # Check the lease before accepting an update into a local buffer.
             token_for(self.root)
@@ -117,16 +132,16 @@ class RemoteStore:
             if self._pending and self._pending_bytes - replacement_size + encoded_size > BATCH_BYTES:
                 self.flush()
                 replacement_size = 0
-            self._cache.setdefault(kind, {})[str(key)] = value
+            self._cache.setdefault(kind, {})[str(key)] = deepcopy(value)
             self._pending[pending_key] = row
             self._pending_sizes[pending_key] = encoded_size
             self._pending_bytes += encoded_size - replacement_size
             if len(self._pending) >= BATCH_SIZE or self._pending_bytes >= BATCH_BYTES:
                 self.flush()
         else:
-            self._write('jobflow_records_put', p_rows=[row], p_import=False)
+            self._commit_rows([row])
             if kind in self._cache:
-                self._cache[kind][str(key)] = value
+                self._cache[kind][str(key)] = deepcopy(value)
 
     def put_many(self, kind, values):
         with self.batch():
@@ -135,26 +150,61 @@ class RemoteStore:
 
     def put_groups(self, groups):
         """Keep an input update and its derived plan in one DB transaction."""
-        self.flush()
         now = _now()
         rows = [{'kind': kind, 'id': str(value['id']), 'body': value,
                  'created_at': now, 'updated_at': now}
                 for kind, values in groups.items() for value in values]
         if not rows:
             return
-        self._write('jobflow_records_put', p_rows=rows, p_import=False)
+        if self._optimistic_depth:
+            for row in rows:
+                self._stage(row['kind'], row['id'], row['body'])
+            return
+        self.flush()
+        self._observe_writes(rows)
+        self._commit_rows(rows)
         for row in rows:
             if row['kind'] in self._cache:
-                self._cache[row['kind']][row['id']] = row['body']
+                self._cache[row['kind']][row['id']] = deepcopy(row['body'])
 
     def flush(self):
+        if self._optimistic_depth:
+            return
         if not self._pending:
             return
         rows = list(self._pending.values())
-        self._write('jobflow_records_put', p_rows=rows, p_import=False)
+        self._commit_rows(rows)
         self._pending.clear()
         self._pending_sizes.clear()
         self._pending_bytes = 0
+
+    def _commit_rows(self, rows):
+        if any(row['kind'] not in INGESTION_KINDS for row in rows):
+            self._commit_checked(rows)
+        else:
+            self._write('jobflow_records_put', p_rows=rows, p_import=False)
+
+    def _commit_checked(self, rows, foreground=False):
+        self._observe_writes(rows)
+        expected, collections = self._checks()
+        now = _now()
+        rows = [{**row, 'created_at': row.get('created_at', now),
+                 'updated_at': row.get('updated_at', now)} for row in rows]
+        result = self.client.rpc('jobflow_records_compare_and_set', self._params(
+            p_rows=rows, p_expected=expected, p_collections=collections,
+            p_foreground=foreground, p_token=None if foreground else token_for(self.root),
+            p_files=list(self._optimistic_files.values()) if foreground else [],
+            p_refresh=bool(foreground and self._optimistic_refresh)))
+        if not isinstance(result, dict) or not result.get('ok'):
+            if isinstance(result, dict) and result.get('conflict'):
+                raise RecordConflictError()
+            raise RemoteError('The private record transaction could not be confirmed.')
+        self._accept_writes(rows)
+
+    def _reset_transaction_reads(self):
+        super()._reset_transaction_reads()
+        self._cache.clear()
+        self._complete.clear()
 
     @contextmanager
     def batch(self, preload=()):

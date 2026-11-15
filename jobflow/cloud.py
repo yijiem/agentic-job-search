@@ -7,9 +7,12 @@ import os
 import re
 import secrets
 import signal
+import shutil
 import sqlite3
 import subprocess
+import tempfile
 import threading
+from contextlib import contextmanager
 from http.cookies import CookieError, SimpleCookie
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -88,7 +91,7 @@ class CloudServer(ThreadingHTTPServer):
             self.limiter = RemoteRateLimiter()
         self.locks = {}
         self.locks_guard = threading.Lock()
-        self.request_slots = threading.BoundedSemaphore(2 if remote_enabled() else 16)
+        self.request_slots = threading.BoundedSemaphore(4 if remote_enabled() else 16)
         super().__init__(address, CloudHandler)
 
     def process_request(self, request, client_address):
@@ -196,6 +199,36 @@ class CloudHandler(JobflowHandler):
         if hydrate:
             hydrate_workspace(root)
         return root
+
+    @contextmanager
+    def _user_workspace(self, account):
+        """An isolated disposable cache lets small commands bypass read locks.
+
+        Canonical workspace routing still comes only from the account registry.
+        Remote objects and the atomic record transaction remain authoritative.
+        Legacy/config writers keep their existing shared-cache serialization.
+        """
+        root = self.server.accounts.workspace(account)
+        if not remote_enabled():
+            yield root
+            return
+        from .remote import workspace_id
+        from .remote_files import CONFIG_FILES
+        identifier = workspace_id(root, required=True)
+        with tempfile.TemporaryDirectory(prefix='jobflow-user-') as directory:
+            scratch = Path(directory)
+            (scratch / 'config').mkdir(mode=0o700)
+            (scratch / 'config/remote.json').write_text(json.dumps({'workspace_id': identifier}))
+            for relative in CONFIG_FILES:
+                source = root / relative
+                if source.is_file() and not source.is_symlink():
+                    try:
+                        shutil.copyfile(source, scratch / relative)
+                    except FileNotFoundError:
+                        pass
+            with file_read_cache():
+                hydrate_workspace(scratch, uploads=False)
+                yield scratch
 
     def _account_state(self, session):
         if not session:
@@ -376,7 +409,7 @@ class CloudHandler(JobflowHandler):
                 self._respond(200, onboarding_state(root))
             elif path == '/api/state':
                 if not onboarding_complete(root):
-                    raise WebError('Complete your profile to open your workspace.', 409)
+                    raise WebError('Complete your profile to open your workspace.', 409, 'onboarding_required')
                 self._respond(200, {**snapshot(root), 'csrf_token': session['csrf_token'],
                     'account': {'email': account['email'], 'hosted': True},
                     'background_job': self.server.queue.status(account['id']),
@@ -554,6 +587,32 @@ class CloudHandler(JobflowHandler):
             if path == '/api/action':
                 validate_action_size(payload, int(self.headers['Content-Length']))
             account = session['account']
+            # Enqueueing search and committing small user edits do not borrow
+            # the worker's renewable workspace lease. The CLI checks revisions
+            # in a short atomic transaction before acknowledging a save.
+            from .foreground import supported
+            if path == '/api/search' or (path == '/api/action' and supported(payload)):
+                with self._user_workspace(account) as root:
+                    if not onboarding_complete(root):
+                        raise WebError('Complete your profile before saving workspace changes.', 409, 'onboarding_required')
+                    if path == '/api/search':
+                        if not self.server.limiter.allow('search:' + account['id'], 3, 3600):
+                            raise WebError('Please wait before starting another search.', 429)
+                        self.server.queue.enqueue(account['id'], 'run')
+                        result = {'background_job': self.server.queue.status(account['id'])}
+                    else:
+                        result = perform_action(root, payload)
+                        if payload.get('action') in ('application', 'task', 'interview'):
+                            try:
+                                if not remote_enabled():
+                                    self.server.queue.enqueue(account['id'], 'refresh')
+                                result['background_job'] = self.server.queue.status(account['id'])
+                            except (OSError, sqlite3.Error, RemoteError):
+                                # The edit and durable refresh intent already
+                                # committed. A status read cannot undo success.
+                                pass
+                self._respond(200, result)
+                return
             # Only contention before entering the execution context is safe to
             # retry automatically. A later lease loss can follow a committed
             # write, so it must never invite a blind replay of the request.
