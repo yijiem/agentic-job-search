@@ -7,13 +7,29 @@
   <meta name="jobflow-build" content="__JOBFLOW_BUILD__">
   <meta name="description" content="Your private job search workspace. Discover opportunities, manage applications, and prepare for what's next.">
   <title>Jobflow · Job search workspace</title>
+  <script src="/theme.js?v=__JOBFLOW_BUILD__"></script>
   <link rel="stylesheet" href="/styles.css?v=__JOBFLOW_BUILD__">
+  <link rel="stylesheet" href="/explore.css?v=__JOBFLOW_BUILD__">
   <link rel="stylesheet" href="/vendor/leaflet/leaflet.css?v=__JOBFLOW_BUILD__">
+  <link rel="stylesheet" href="/vendor/maplibre/maplibre-gl.css?v=__JOBFLOW_BUILD__">
   <link rel="stylesheet" href="/trends.css?v=__JOBFLOW_BUILD__">
   <link rel="stylesheet" href="/maps.css?v=__JOBFLOW_BUILD__">
+  <link rel="stylesheet" href="/batches.css?v=__JOBFLOW_BUILD__">
+  <link rel="stylesheet" href="/resumes.css?v=__JOBFLOW_BUILD__">
+  <link rel="stylesheet" href="/pdf-review.css?v=__JOBFLOW_BUILD__">
+  <link rel="stylesheet" href="/resume-controls.css?v=__JOBFLOW_BUILD__">
+  <link rel="stylesheet" href="/my-account.css?v=__JOBFLOW_BUILD__">
   <script src="/vendor/leaflet/leaflet.js?v=__JOBFLOW_BUILD__" defer></script>
+  <script src="/vendor/maplibre/maplibre-gl-csp.js?v=__JOBFLOW_BUILD__" defer></script>
+  <script src="/vendor/maplibre/leaflet-maplibre-gl.js?v=__JOBFLOW_BUILD__" defer></script>
   <script src="/trends.js?v=__JOBFLOW_BUILD__" defer></script>
   <script src="/maps.js?v=__JOBFLOW_BUILD__" defer></script>
+  <script src="/batches.js?v=__JOBFLOW_BUILD__" defer></script>
+  <script src="/resumes.js?v=__JOBFLOW_BUILD__" defer></script>
+  <script src="/pdf-review.js?v=__JOBFLOW_BUILD__" defer></script>
+  <script src="/resume-controls.js?v=__JOBFLOW_BUILD__" defer></script>
+  <script src="/my-account.js?v=__JOBFLOW_BUILD__" defer></script>
+  <script src="/company-logos.js?v=__JOBFLOW_BUILD__" defer></script>
   <script src="/app.js?v=__JOBFLOW_BUILD__" defer></script>
 </head>
 <body>
@@ -22,7 +38,7 @@
     <div class="header-inner">
       <a href="#overview" class="brand" aria-label="Jobflow overview"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="m16 8-2.5 5.5L8 16l2.5-5.5L16 8Z"/></svg><span>JOBFLOW</span></a>
       <div class="sidebar"><nav id="navigation" aria-label="Main navigation"></nav><a href="#sources" class="source-link" id="source-link">Sources <span aria-hidden="true">↗</span></a></div>
-      <div class="masthead-actions"><a id="account-link" href="/account?edit=1" hidden>Account</a><button id="cloud-search" class="button" hidden>Update matches</button><span class="local-status"><i class="status-dot"></i> Private workspace</span><button id="refresh" class="icon-button" title="Refresh workspace" aria-label="Refresh workspace">↻</button><button class="icon-button mobile-menu" id="menu-toggle" aria-label="Toggle navigation" aria-controls="navigation" aria-expanded="false">☰</button></div>
+      <div class="masthead-actions"><a id="account-link" href="#account">My account</a><button id="cloud-search" class="button" hidden>Update matches</button><span class="local-status"><i class="status-dot"></i> Private workspace</span><button id="refresh" class="icon-button" title="Refresh workspace" aria-label="Refresh workspace">↻</button><button id="theme-toggle" class="icon-button theme-toggle" type="button" title="Switch to dark mode" aria-label="Switch to dark mode" aria-pressed="false"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/></svg></button><button class="icon-button mobile-menu" id="menu-toggle" aria-label="Toggle navigation" aria-controls="navigation" aria-expanded="false">☰</button></div>
     </div>
   </header>
   <div class="shell">

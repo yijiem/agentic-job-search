@@ -3,7 +3,7 @@
 // Account credentials stay in HttpOnly cookies. This page never stores tokens,
 // resumes, or profile data in localStorage or sessionStorage.
 const accountState = {account:null, draft:null, step:'email', email:'', busy:false,
-  pendingUpload:null, pendingSuggestions:[], uploadMessage:'', error:'', dirty:false};
+  pendingUpload:null, uploadQueue:[], pendingSuggestions:[], uploadMessage:'', error:'', dirty:false};
 const accountNode = selector => document.querySelector(selector);
 const accountEsc = value => String(value ?? '').replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -20,14 +20,14 @@ function draftFromOnboarding(onboarding = {}) {
   preferences.location_mode ??= 'any';
   preferences.daily_minutes ??= 90;
   preferences.timezone ??= Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  return {profile, preferences, complete:Boolean(onboarding.complete), uploads:accountCopy(onboarding.uploads || [])};
+  return {profile, preferences, applicant:accountCopy(onboarding.applicant || {}), complete:Boolean(onboarding.complete), uploads:accountCopy(onboarding.uploads || [])};
 }
 function draftPayload(draft) {
   // The server merges these editable preferences into the existing settings.
   // Do not send unrelated backend settings as changes.
   const keys = ['preferred_locations','allowed_levels','target_tc','currency','daily_minutes','timezone','location_mode'];
   const preferences = Object.fromEntries(keys.filter(key => draft.preferences[key] !== undefined).map(key => [key,accountCopy(draft.preferences[key])]));
-  return {profile:accountCopy(draft.profile), preferences};
+  return {profile:accountCopy(draft.profile), preferences, applicant:accountCopy(draft.applicant || {})};
 }
 function textSuggestions(text, sourceFileId = '') {
   return String(text || '').replace(/\r\n?/g, '\n').split(/\n\s*\n/)
@@ -121,23 +121,32 @@ function signInCard() {
 function uploadList() {
   const uploads = accountState.draft.uploads || [];
   if (!uploads.length) return '';
-  return '<ul class="upload-list" aria-label="Saved resume files">' + uploads.map(upload => `<li>↳ ${accountEsc(upload.filename || upload.name || 'Resume file')} <span>· saved privately</span></li>`).join('') + '</ul>';
+  return '<ul class="upload-list" aria-label="Saved resume files">' + uploads.map(upload => `<li>↳ ${upload.application_resume_id ? `<a href="/api/application-resumes/${encodeURIComponent(upload.application_resume_id)}" target="_blank" rel="noopener noreferrer">${accountEsc(upload.filename || upload.name || 'Resume file')} ↗</a>` : accountEsc(upload.filename || upload.name || 'Resume file')} <span>· ready for applications</span></li>`).join('') + '</ul>';
 }
 function pendingUpload() {
   const upload = accountState.pendingUpload;
   if (!upload) return '';
   const pending = accountState.pendingSuggestions;
-  if (upload.extraction_status === 'needs_text' || !pending.length) return `<div class="pending-upload"><h3>File saved. Add the text to review.</h3><p class="help">${upload.extraction_status === 'needs_text' ? 'This version stores PDF files privately but does not extract PDF text. Copy the relevant text from your resume below.' : 'No text statements were extracted. Paste your background below to add it to your profile.'}</p><p class="upload-name">${accountEsc(upload.filename)}</p><div class="form-field"><label for="resume-pasted-text">Resume or background text</label><textarea id="resume-pasted-text" rows="7" maxlength="100000" placeholder="Paste your experience and accomplishments here.">${accountEsc(upload.text || '')}</textarea><small>Separate statements with a blank line. You’ll review them before adding them.</small></div><button class="button" type="button" data-account-action="review-paste">Review statements</button></div>`;
-  return `<div class="pending-upload"><h3>Choose what belongs in your profile.</h3><p class="help">These statements come from your uploaded or pasted text. Select the ones to keep, then edit them below before saving.</p><p class="upload-name">${accountEsc(upload.filename || 'Pasted background')}</p><div class="pending-list">${pending.map((item, index) => `<label class="pending-choice"><input type="checkbox" data-pending="${index}"><span>${accountEsc(item.text)}</span></label>`).join('')}</div><div class="button-row"><button type="button" class="text-button" data-account-action="select-suggestions">Select all</button><button type="button" class="button" data-account-action="add-suggestions">Add selected statements</button></div></div>`;
+  if (upload.extraction_status === 'needs_text' || !pending.length) return `<div class="pending-upload"><h3>File saved. Add the text to review.</h3><p class="help">${upload.extraction_status === 'needs_text' ? 'This version stores PDF files privately but does not extract PDF text. Copy the relevant text from your resume below.' : 'No text statements were extracted. Paste your background below to add it to your profile.'}</p><p class="upload-name">${accountEsc(upload.filename)}</p><div class="form-field"><label for="resume-pasted-text">Resume or background text</label><textarea id="resume-pasted-text" rows="7" maxlength="100000" placeholder="Paste your experience and accomplishments here.">${accountEsc(upload.text || '')}</textarea><small>Separate statements with a blank line. You’ll review them before adding them.</small></div><button class="button" type="button" data-account-action="review-paste">Review statements</button><button class="text-button pending-next" type="button" data-account-action="next-upload">${accountState.uploadQueue.length ? 'Review next resume' : 'Keep file without adding statements'}</button></div>`;
+  return `<div class="pending-upload"><h3>Choose what belongs in your profile.</h3><p class="help">These statements come from your uploaded or pasted text. Select the ones to keep, then edit them below before saving.</p><p class="upload-name">${accountEsc(upload.filename || 'Pasted background')}</p><div class="pending-list">${pending.map((item, index) => `<label class="pending-choice"><input type="checkbox" data-pending="${index}"><span>${accountEsc(item.text)}</span></label>`).join('')}</div><div class="button-row"><button type="button" class="text-button" data-account-action="select-suggestions">Select all</button><button type="button" class="button" data-account-action="add-suggestions">Add selected statements</button></div><button class="text-button pending-next" type="button" data-account-action="next-upload">${accountState.uploadQueue.length ? 'Review next resume' : 'Keep file without adding statements'}</button></div>`;
 }
 function evidenceFields() {
   const evidence = accountState.draft.profile.evidence;
   if (!evidence.length) return '<p class="empty-statements">Add a resume, paste your background, or write a statement about your experience. Only the statements you review and save will be used in your profile.</p>';
   return evidence.map((item, index) => `<section class="statement" data-evidence="${index}"><div class="statement-top"><span>STATEMENT ${index + 1}</span><button class="remove-button" type="button" data-account-action="remove-statement" data-index="${index}" aria-label="Remove statement ${index + 1}">Remove</button></div><label class="field-label" for="evidence-text-${index}">Experience or accomplishment</label><textarea id="evidence-text-${index}" data-evidence-field="text" rows="3" required>${accountEsc(item.text || '')}</textarea><div class="form-row"><div class="form-field"><label for="evidence-tags-${index}">Skills in this statement</label><input id="evidence-tags-${index}" data-evidence-field="tags" value="${accountEsc((item.tags || []).join(', '))}" placeholder="Python, distributed systems"></div><div class="form-field"><label for="evidence-source-${index}">Source or reference (optional)</label><input id="evidence-source-${index}" data-evidence-field="source_url" value="${accountEsc(item.source_url || '')}" placeholder="https://…"></div></div></section>`).join('');
 }
+function applicantFields() {
+  const applicant = accountState.draft.applicant || {};
+  const fields = [['first_name','First name','text'],['last_name','Last name','text'],['email','Email','email'],['phone','Phone','tel'],['location','Location','text'],['linkedin','LinkedIn URL','url'],['website','Website / portfolio URL','url']];
+  return `<details class="background-details" open><summary>Application details</summary><p class="help">Save these once to fill new applications automatically. You can review them for each role.</p><div class="form-row">${fields.map(([key,label,type])=>`<div class="form-field"><label for="account-applicant-${key}">${label}</label><input id="account-applicant-${key}" data-account-applicant="${key}" type="${type}" maxlength="1000" value="${accountEsc(applicant[key] || '')}"></div>`).join('')}</div></details>`;
+}
+function nextUploadReview() {
+  accountState.pendingUpload = accountState.uploadQueue.shift() || null;
+  accountState.pendingSuggestions = accountState.pendingUpload ? normalizedSuggestions(accountState.pendingUpload) : [];
+}
 function profileCard() {
   const profile = accountState.draft.profile;
-  return `<section class="account-card"><div class="eyebrow">YOUR BACKGROUND</div><h2>${accountState.draft.complete ? 'Make yourself at home.' : 'Bring your experience.'}</h2><p class="card-description">Review the experience you want Jobflow to work with. Keep your accomplishments in your own words.</p>${reuseNote()}<form id="profile-form"><div class="form-field"><label for="profile-name">Your name</label><input id="profile-name" name="name" maxlength="200" autocomplete="name" value="${accountEsc(profile.name)}" required></div><div class="form-field"><label for="profile-headline">Professional focus</label><input id="profile-headline" maxlength="2000" value="${accountEsc(profile.headline)}" placeholder="e.g. Software engineer focused on infrastructure"></div><div class="form-field"><label for="profile-skills">Skills</label><input id="profile-skills" value="${accountEsc(profile.skills.join(', '))}" placeholder="e.g. Python, distributed systems, engineering leadership"><small>Separate skills with commas. These help match your experience to roles.</small></div><div class="upload-box"><h3>Add a resume</h3><p>TXT, Markdown, DOCX, or PDF · up to 5 MB. PDF text can be pasted after upload.</p><label class="field-label" for="resume-file">Choose a file</label><input id="resume-file" type="file" accept=".txt,.md,.docx,.pdf"><button class="button" type="button" data-account-action="upload">Upload and review</button>${uploadList()}${accountState.uploadMessage ? `<p class="upload-status" role="status">${accountEsc(accountState.uploadMessage)}</p>` : ''}</div>${pendingUpload()}<details class="background-details"><summary>Add background without a file</summary><div class="form-field"><label for="background-text">Experience and accomplishments</label><textarea id="background-text" rows="5" maxlength="100000" placeholder="Paste or write statements from your background."></textarea><small>Separate statements with a blank line. You can review and edit each one.</small></div><button class="button" type="button" data-account-action="review-background">Review statements</button></details><div class="statement-section"><div class="statement-heading"><h3>Your reviewed background</h3><button class="text-button" type="button" data-account-action="add-statement">+ Add statement</button></div><p class="help">These statements support your matches and drafts. Saving keeps your existing application and preparation history.</p><div id="evidence-fields">${evidenceFields()}</div></div><p id="account-error" class="form-error" role="alert" tabindex="-1">${accountEsc(accountState.error)}</p><div class="button-row"><span class="help">Step 2 of 3</span><button class="button primary" type="submit">Review preferences <span aria-hidden="true">→</span></button></div></form></section>`;
+  return `<section class="account-card"><div class="eyebrow">YOUR BACKGROUND</div><h2>${accountState.draft.complete ? 'Make yourself at home.' : 'Bring your experience.'}</h2><p class="card-description">Review the experience you want Jobflow to work with. Keep your accomplishments in your own words.</p>${reuseNote()}<form id="profile-form"><div class="form-field"><label for="profile-name">Your name</label><input id="profile-name" name="name" maxlength="200" autocomplete="name" value="${accountEsc(profile.name)}" required></div><div class="form-field"><label for="profile-headline">Professional focus</label><input id="profile-headline" maxlength="2000" value="${accountEsc(profile.headline)}" placeholder="e.g. Software engineer focused on infrastructure"></div><div class="form-field"><label for="profile-skills">Skills</label><input id="profile-skills" value="${accountEsc(profile.skills.join(', '))}" placeholder="e.g. Python, distributed systems, engineering leadership"><small>Separate skills with commas. These help match your experience to roles.</small></div>${applicantFields()}<div class="upload-box"><h3>Your resume library</h3><p>Upload one or several versions. They’ll be saved for applications, so you won’t need to upload them again. TXT, Markdown, DOCX, or PDF · up to 5 MB per file.</p><label class="field-label" for="resume-file">Choose resume files</label><input id="resume-file" type="file" accept=".txt,.md,.docx,.pdf" multiple><button class="button" type="button" data-account-action="upload">Upload resumes and review</button>${uploadList()}${accountState.uploadMessage ? `<p class="upload-status" role="status">${accountEsc(accountState.uploadMessage)}</p>` : ''}</div>${pendingUpload()}<details class="background-details"><summary>Add background without a file</summary><div class="form-field"><label for="background-text">Experience and accomplishments</label><textarea id="background-text" rows="5" maxlength="100000" placeholder="Paste or write statements from your background."></textarea><small>Separate statements with a blank line. You can review and edit each one.</small></div><button class="button" type="button" data-account-action="review-background">Review statements</button></details><div class="statement-section"><div class="statement-heading"><h3>Your reviewed background</h3><button class="text-button" type="button" data-account-action="add-statement">+ Add statement</button></div><p class="help">These statements support your matches and drafts. Saving keeps your existing application and preparation history.</p><div id="evidence-fields">${evidenceFields()}</div></div><p id="account-error" class="form-error" role="alert" tabindex="-1">${accountEsc(accountState.error)}</p><div class="button-row"><span class="help">Step 2 of 3</span><button class="button primary" type="submit">Review preferences <span aria-hidden="true">→</span></button></div></form></section>`;
 }
 function preferencesCard() {
   const prefs = accountState.draft.preferences;
@@ -161,6 +170,8 @@ function captureProfile() {
   profile.name = accountNode('#profile-name').value.trim();
   profile.headline = accountNode('#profile-headline').value.trim();
   profile.skills = splitValues(accountNode('#profile-skills').value);
+  accountState.draft.applicant ||= {};
+  document.querySelectorAll('[data-account-applicant]').forEach(node => { accountState.draft.applicant[node.dataset.accountApplicant] = node.value.trim(); });
   document.querySelectorAll('[data-evidence]').forEach(node => {
     const index = Number(node.dataset.evidence), item = profile.evidence[index];
     if (!item) return;
@@ -224,24 +235,36 @@ async function accountAction(action, trigger) {
   if (action === 'logout') return withAccountBusy(async () => {
     await accountAPI('/api/auth/logout', {});
     accountState.account = null; accountState.draft = null; accountState.pendingUpload = null;
-    accountState.pendingSuggestions = []; accountState.step = 'email'; accountState.dirty = false;
+    accountState.pendingSuggestions = []; accountState.uploadQueue = []; accountState.step = 'email'; accountState.dirty = false;
     renderAccount(); focusAccountMain();
   });
   if (action === 'back-profile') { capturePreferences(); accountState.step = 'profile'; renderAccount(); focusAccountMain(); return; }
   if (!accountState.account?.authenticated || !accountState.draft) return;
   captureProfile();
   if (action === 'upload') return withAccountBusy(async () => {
-    const file = accountNode('#resume-file').files[0];
-    if (!file) throw new Error('Choose a resume file first.');
-    if (!/\.(txt|md|docx|pdf)$/i.test(file.name)) throw new Error('Choose a TXT, Markdown, DOCX, or PDF file.');
-    if (file.size > 5 * 1024 * 1024 || !file.size) throw new Error('Choose a non-empty file no larger than 5 MB.');
-    const upload = await accountAPI('/api/resume', {filename:file.name, content_base64:await fileBase64(file)});
-    accountState.pendingUpload = upload; accountState.pendingSuggestions = normalizedSuggestions(upload);
-    accountState.draft.uploads.push({id:upload.id, filename:upload.filename || file.name});
-    accountState.uploadMessage = 'File saved privately. Review its contents before adding statements to your profile.';
+    const files = Array.from(accountNode('#resume-file').files || []);
+    if (!files.length) throw new Error('Choose at least one resume file first.');
+    for (const file of files) {
+      if (!/\.(txt|md|docx|pdf)$/i.test(file.name)) throw new Error('Choose TXT, Markdown, DOCX, or PDF files.');
+      if (file.size > 5 * 1024 * 1024 || !file.size) throw new Error('Choose non-empty files no larger than 5 MB each.');
+    }
+    if (accountState.pendingUpload) accountState.uploadQueue.unshift({...accountState.pendingUpload, suggestions:accountCopy(accountState.pendingSuggestions)});
+    let failure = null, added = 0;
+    for (const file of files) {
+      try {
+        const upload = await accountAPI('/api/resume', {filename:file.name, content_base64:await fileBase64(file)});
+        accountState.uploadQueue.push(upload);
+        accountState.draft.uploads.push({id:upload.id, filename:upload.filename || file.name, application_resume_id:upload.application_resume_id});
+        added++;
+      } catch (error) { failure = error; break; }
+    }
+    nextUploadReview();
+    accountState.uploadMessage = `${added} resume${added === 1 ? '' : 's'} saved for applications. Review each file’s statements before adding them to your profile.`;
     renderAccount();
     accountNode('.pending-upload')?.scrollIntoView({block:'center'});
+    if (failure) throw new Error(accountState.uploadMessage + ' ' + failure.message);
   });
+  if (action === 'next-upload') { nextUploadReview(); renderAccount(); return; }
   if (action === 'review-background' || action === 'review-paste') {
     const input = accountNode(action === 'review-background' ? '#background-text' : '#resume-pasted-text');
     const sourceId = action === 'review-paste' ? accountState.pendingUpload?.id || '' : '';
@@ -258,7 +281,7 @@ async function accountAction(action, trigger) {
     const selected = Array.from(document.querySelectorAll('[data-pending]:checked')).map(node => accountState.pendingSuggestions[Number(node.dataset.pending)]).filter(Boolean);
     if (!selected.length) { setAccountError('Select at least one statement to add.'); return; }
     const added = appendSuggestions(accountState.draft, selected);
-    accountState.pendingUpload = null; accountState.pendingSuggestions = []; accountState.dirty = true;
+    nextUploadReview(); accountState.dirty = true;
     renderAccount(); accountNotice(`${added} statement${added === 1 ? '' : 's'} added for your review.`);
     accountNode('#evidence-fields')?.scrollIntoView({block:'start'}); return;
   }

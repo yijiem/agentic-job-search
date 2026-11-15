@@ -1,0 +1,61 @@
+/* Explore roles: company tile overview and role drilldown, using the workspace's theme tokens. */
+.roles-view-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 20px; }
+.roles-view-heading > .muted { font-size: 13px; }
+.roles-view-switch { display: inline-flex; padding: 4px; gap: 4px; border: 1px solid var(--border); background: var(--surface); border-radius: 7px; flex: none; }
+.roles-view-switch button { display: flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 4px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 650; }
+.roles-view-switch button svg { width: 16px; height: 16px; }
+.roles-view-switch button[aria-pressed="true"] { color: var(--ink); background: var(--accent-light); box-shadow: inset 0 0 0 1px var(--border); }
+.roles-view-switch button:hover { color: var(--ink); }
+.company-browser { margin: 26px 0 24px; min-width: 0; }
+.company-browser-caption { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+.company-browser-caption strong { color: var(--ink); }
+.company-sort-control { display: flex; align-items: center; gap: 10px; }
+.company-sort-control label { font-size: 12px; color: var(--muted); }
+.company-sort-control select { min-height: 36px; font-size: 13px; padding: 7px 30px 7px 10px; }
+.company-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 6px; }
+.company-tile { position: relative; isolation: isolate; overflow: hidden; min-width: 0; min-height: 206px; padding: 16px; display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-end; gap: 5px; border-radius: 3px; border: 1px solid var(--border); background: #fff; color: #fff; text-align: left; transition: filter .15s, border-color .15s; }
+.company-tile::after { content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none; background: linear-gradient(180deg, transparent 25%, rgba(0,0,0,.08) 40%, rgba(0,0,0,.82) 100%); }
+.company-tile:hover { filter: brightness(1.08); border-color: var(--accent); }
+.company-tile:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; z-index: 1; }
+.company-tile .company-logo { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; border-radius: 0; background: #e6e6e6; color: #4c4c4c; font-size: 76px; }
+.company-tile .company-logo.has-image { background: #fff; }
+.company-tile .company-logo img { width: 100%; height: 100%; padding: 0; object-fit: scale-down; object-position: center; }
+.company-tile > :not(.company-logo) { position: relative; z-index: 2; text-shadow: 0 1px 3px rgba(0,0,0,.65); }
+.company-tile-name { font-size: 17px; line-height: 1.3; overflow-wrap: anywhere; }
+.company-tile-count { color: #fff; font-size: 13px; }
+.company-tile-score { display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 4px; color: #f0f0f0; font-size: 11px; }
+.company-tile-score strong { color: #fff; }
+.company-tile-score > span { margin-left: auto; font-size: 15px; }
+.company-back { display: inline-flex; align-items: center; padding: 4px 0; margin: 20px 0; }
+.company-results-title { display: flex; align-items: center; gap: 12px; }
+.company-results-title h2 { margin: 0 0 5px; font-size: 22px; }
+.company-results-title > .company-logo { width: 44px; height: 44px; border-radius: 8px; }
+.company-results-title > div > span, .company-ranking-note { color: var(--muted); font-size: 12px; }
+#company-role-panel .result-heading { align-items: center; margin-top: 0; margin-bottom: 18px; }
+#company-role-panel .result-heading .button-group { justify-content: flex-end; gap: 6px 18px; }
+.company-logo { overflow: hidden; }
+.company-logo.has-image { background: #fff; border-color: #d8e0e4; }
+.company-logo.has-image > span { display: none; }
+.company-logo img { display: block; width: 100%; height: 100%; object-fit: contain; padding: 4px; }
+.company-logo img[hidden] { display: none; }
+/* Dark surroundings; the logo area keeps a neutral backing so transparent
+   black marks remain visible without adding a full-tile white surface. */
+[data-theme="dark"] .company-tile { background: #111519; border-color: #30363c; }
+[data-theme="dark"] .company-tile .company-logo,
+[data-theme="dark"] .company-tile .company-logo.has-image { background: #191e23; color: #c2c8ce; }
+[data-theme="dark"] .company-tile .company-logo img { width: auto; height: auto; max-width: 100%; max-height: 100%; background: #d7dade; }
+[data-theme="dark"] .company-tile::after { background: linear-gradient(180deg, rgba(8,11,14,.38) 0%, rgba(8,11,14,.14) 40%, rgba(8,11,14,.96) 100%); }
+[data-theme="dark"] .company-tile:hover { border-color: #65717c; filter: brightness(1.12); }
+@media (max-width: 760px) {
+  .roles-view-heading { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .roles-view-heading > .muted { font-size: 12px; }
+  .company-sort-control { width: 100%; justify-content: space-between; }
+  .company-sort-control select { min-width: 0; max-width: 220px; }
+  .company-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+  .company-tile { min-height: 185px; padding: 12px; }
+  .company-tile-name { font-size: 15px; }
+  .company-tile-score { font-size: 10px; }
+  #company-role-panel .result-heading { align-items: flex-start; gap: 16px; }
+  #company-role-panel .result-heading .button-group { justify-content: flex-start; }
+  .company-ranking-note { flex-basis: 100%; }
+}

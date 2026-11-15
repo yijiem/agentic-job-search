@@ -1,3 +1,4 @@
+import base64
 import gzip
 import io
 import json
@@ -99,8 +100,16 @@ class CloudHTTPTests(unittest.TestCase):
         return account, root
 
     def test_unauthenticated_private_apis_denied_and_home_redirects(self):
-        for path in ('/api/state', '/api/onboarding', '/api/jobs/shared-id', '/api/version', '/app.js',
-                     '/trends.js', '/maps.js', '/trends.css', '/maps.css', '/vendor/leaflet/leaflet.js'):
+        for path in ('/api/state', '/api/onboarding', '/api/profile', '/api/jobs/shared-id', '/api/version', '/app.js',
+                     '/my-account.js', '/my-account.css',
+                     '/api/batches', '/api/resumes', '/api/resumes/unknown',
+                     '/api/resume-reviews', '/api/resume-reviews/unknown', '/pdf-review.js',
+                     '/vendor/pdfjs/pdf.mjs', '/vendor/pdfjs/pdf.worker.mjs',
+                     '/resumes.js', '/resumes.css', '/api/application-resumes/unknown', '/browser-worker.zip',
+                     '/trends.js', '/maps.js', '/trends.css', '/maps.css', '/vendor/leaflet/leaflet.js',
+                     '/vendor/maplibre/maplibre-gl-csp.js',
+                     '/vendor/maplibre/maplibre-gl-csp-worker.js',
+                     '/vendor/maplibre/maplibre-gl.css', '/vendor/maplibre/leaflet-maplibre-gl.js'):
             with self.subTest(path=path):
                 status, unused, body = self.request('GET', path)
                 self.assertEqual(status, 401)
@@ -111,6 +120,69 @@ class CloudHTTPTests(unittest.TestCase):
         self.assertEqual(self.request('GET', '/api/account')[2], {'authenticated': False})
         self.assertEqual(self.request('POST', '/api/action', {'action': 'prep'})[0], 401)
 
+    def test_profile_api_uses_signed_in_workspace_and_filters_private_metadata(self):
+        unused, root_one = self.seed('one@example.com', 'One')
+        self.seed('two@example.com', 'Two')
+        profile_path = root_one / 'config/profile.json'
+        profile = json.loads(profile_path.read_text())
+        profile['private_note'] = 'Private internal note'
+        profile['evidence'][0]['private_note'] = 'Private evidence metadata'
+        profile['resume_sources'] = ['/private/one/resume.txt']
+        profile_path.write_text(json.dumps(profile))
+        before = profile_path.read_bytes()
+        cookie_one, unused, unused = self.login('one@example.com')
+        cookie_two, unused, unused = self.login('two@example.com')
+        status, headers, first = self.request('GET', '/api/profile', cookie=cookie_one)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.assertEqual(first['profile']['name'], 'One')
+        self.assertEqual(first['profile']['skills'], ['Python'])
+        self.assertEqual(first['profile']['evidence'][0]['text'], 'One built an actual system.')
+        self.assertNotIn('Private', json.dumps(first))
+        self.assertNotIn('/private/', json.dumps(first))
+        second = self.request('GET', '/api/profile?account=one@example.com', cookie=cookie_two)[2]
+        self.assertEqual(second['profile']['name'], 'Two')
+        self.assertNotIn('One', json.dumps(second))
+        self.assertEqual(profile_path.read_bytes(), before)
+
+    def test_application_batches_and_resume_files_are_account_isolated(self):
+        self.seed('one@example.com', 'One')
+        self.seed('two@example.com', 'Two')
+        cookie_one, csrf_one, unused = self.login('one@example.com')
+        cookie_two, csrf_two, unused = self.login('two@example.com')
+        status, unused, first = self.request('GET', '/api/batches', cookie=cookie_one)
+        self.assertEqual(status, 200)
+        status, unused, second = self.request('GET', '/api/batches', cookie=cookie_two)
+        self.assertEqual(status, 200)
+        self.assertNotEqual(first['workspace_id'], second['workspace_id'])
+        status, unused, upload = self.request('POST', '/api/action', {
+            'action': 'batch', 'op': 'upload_resume', 'filename': 'private.txt',
+            'content_base64': base64.b64encode(b'One private resume').decode('ascii'),
+        }, cookie=cookie_one, csrf=csrf_one)
+        self.assertEqual(status, 200, upload)
+        resume_id = upload['resume']['id']
+        status, unused, batch = self.request('POST', '/api/action', {
+            'action': 'batch', 'op': 'create', 'name': 'One private batch',
+            'job_ids': ['shared-id'], 'resume_id': resume_id,
+            'applicant': {'first_name': 'One', 'last_name': 'Candidate', 'email': 'one@example.com'},
+        }, cookie=cookie_one, csrf=csrf_one)
+        self.assertEqual(status, 200, batch)
+        second = self.request('GET', '/api/batches', cookie=cookie_two)[2]
+        self.assertEqual(second['batches'], [])
+        self.assertEqual(second['resumes'], [])
+        self.assertNotIn('One private', json.dumps(second))
+        self.assertNotEqual(self.request('GET', '/api/batches/' + batch['batch']['id'], cookie=cookie_two)[0], 200)
+        self.assertNotEqual(self.request('GET', '/api/application-resumes/' + resume_id, cookie=cookie_two)[0], 200)
+        self.assertNotEqual(self.request('GET', '/api/resumes/' + resume_id, cookie=cookie_two)[0], 200)
+        self.assertEqual(self.request('GET', '/api/resumes', cookie=cookie_two)[2]['resumes'], [])
+        self.assertEqual(self.request('GET', '/api/resumes/' + resume_id, cookie=cookie_one)[0], 200)
+        self.assertEqual(self.request('GET', '/api/application-resumes/' + resume_id, cookie=cookie_one)[2], b'One private resume')
+        status, unused, result = self.request('POST', '/api/action', {
+            'action': 'batch', 'op': 'claim', 'worker_id': 'worker-one',
+            'workspace_id': first['workspace_id'],
+        }, cookie=cookie_two, csrf=csrf_two)
+        self.assertEqual(status, 409, result)
+
     def test_authenticated_dashboard_assets_share_allowlist_and_preserve_binary_types(self):
         self.server.accounts.invite('owner@example.com')
         cookie, unused_csrf, unused_data = self.login('owner@example.com')
@@ -119,11 +191,17 @@ class CloudHTTPTests(unittest.TestCase):
         self.server.asset_directory = assets.resolve()
         public = {
             'trends.js': (b'window.JobflowTrends = {};', None),
+            'resume-controls.js': (b'window.JobflowResumeControls = {};', None),
+            'resume-controls.css': (b'.resume-picker {}', 'text/css; charset=utf-8'),
             'trends.css': (b'.jf-trend {}', 'text/css; charset=utf-8'),
             'maps.js': (b'window.JobflowMaps = {};', None),
             'maps.css': (b'.jf-map {}', 'text/css; charset=utf-8'),
             'vendor/leaflet/leaflet.js': (b'window.L = {};', None),
             'vendor/leaflet/leaflet.css': (b'.leaflet-container {}', 'text/css; charset=utf-8'),
+            'vendor/maplibre/maplibre-gl-csp.js': (b'window.maplibregl = {};', None),
+            'vendor/maplibre/maplibre-gl-csp-worker.js': (b'self.onmessage = function() {};', None),
+            'vendor/maplibre/maplibre-gl.css': (b'.maplibregl-map {}', 'text/css; charset=utf-8'),
+            'vendor/maplibre/leaflet-maplibre-gl.js': (b'window.L.maplibreGL = function() {};', None),
             'vendor/leaflet/images/marker-icon.png': (b'\x89PNG\r\n', 'image/png'),
             'fonts/nunito-latin.woff2': (b'wOF2binary', 'font/woff2'),
             'art/jobflow-cosmos.webp': (b'RIFFbinaryWEBP', 'image/webp'),
@@ -139,15 +217,31 @@ class CloudHTTPTests(unittest.TestCase):
                 if mime:
                     self.assertEqual(headers['Content-Type'], mime)
                 self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
-                self.assertIn("img-src 'self' data: https://tile.openstreetmap.org;",
-                              headers['Content-Security-Policy'])
+                policy = {part.strip().split(' ', 1)[0]: part.strip().split(' ', 1)[1]
+                          for part in headers['Content-Security-Policy'].split(';') if part.strip()}
+                self.assertEqual(policy['img-src'].split(), ["'self'", 'data:', 'blob:',
+                                 'https://tile.openstreetmap.org', 'https://tiles.openfreemap.org'])
+                self.assertEqual(policy['connect-src'].split(), ["'self'", 'https://tiles.openfreemap.org'])
+                self.assertEqual(policy['script-src'], "'self'")
+                self.assertEqual(policy['worker-src'], "'self'")
+                self.assertEqual(policy['default-src'], "'self'")
+                self.assertEqual(policy['font-src'], "'self' blob:")
+                self.assertEqual(policy['base-uri'], "'none'")
+                self.assertEqual(policy['frame-ancestors'], "'none'")
+                self.assertEqual(policy['form-action'], "'self'")
+                if name.endswith('.js'):
+                    self.assertIn(headers['Content-Type'],
+                                  ('text/javascript; charset=utf-8', 'application/javascript; charset=utf-8'))
                 self.assertEqual(headers['Referrer-Policy'], 'strict-origin-when-cross-origin')
-        for name in ('vendor/leaflet/private.json', 'vendor/leaflet/leaflet.js.map', 'config/profile.json'):
+        for name in ('vendor/leaflet/private.json', 'vendor/leaflet/leaflet.js.map', 'config/profile.json',
+                     'vendor/maplibre/private.json', 'vendor/maplibre/maplibre-gl-csp.js.map',
+                     'vendor/maplibre/unlisted-worker.js'):
             target = assets / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b'not-public')
             self.assertEqual(self.request('GET', '/' + name, cookie=cookie)[0], 404)
         self.assertEqual(self.request('GET', '/vendor/leaflet/%2e%2e/leaflet/leaflet.js', cookie=cookie)[0], 404)
+        self.assertEqual(self.request('GET', '/vendor/maplibre/%2e%2e/maplibre/maplibre-gl-csp.js', cookie=cookie)[0], 404)
         (assets / 'maps.js').unlink()
         private = self.root / 'private.js'
         private.write_bytes(b'not-public')

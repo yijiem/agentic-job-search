@@ -256,7 +256,64 @@ async function main() {
     assert.ok(!html.includes('Connect account'));
   }
 
-  console.log('Preparation UI regressions passed (9 scenarios).');
+  {
+    const data = fixture();
+    data.tasks = [makeTask('existing')];
+    const app = appContext(data);
+    app.context.proposal = {
+      job_id:'role-a',selected_job_id:'role-a',company:'Example',title:'Storage <Engineer>',
+      summary:'Recorded evidence only',budget:90,timezone:'America/Los_Angeles',
+      new_count:1,rescheduled_count:1,focused_count:1,completed_preserved:3,
+      next_steps:[{kind:'resume',job_id:'role-a',title:'Review saved resume',detail:'Reuse your saved version'},
+        {kind:'practice',job_id:'role-a',title:'Practice <coding>',detail:'Recorded role overlap',prompt:'<script>untrusted()</script>'}],
+      changes:[{id:'existing',kind:'focused',title:'Existing practice',date:'2026-11-14',minutes:30,
+        focus:'Storage systems',guidance:'Test the <invariants>'}],
+      days:[{date:'2026-11-14',minutes:90}],notes:['Keep my notes'],
+      evidence_note:'Local planner; no live research',fingerprint:'reviewed-inputs',
+    };
+    app.evaluate('state.agentProposal=proposal');
+    const html = app.evaluate('renderAgentPlanner()');
+    assert.ok(html.includes('data-action="agent-apply"'), 'Schedule changes require explicit review approval');
+    assert.ok(html.includes('data-task="existing"'), 'Existing practice remains editable from the preview');
+    assert.ok(html.includes('data-resume-role="role-a"'), 'Guidance connects to the saved resume workflow');
+    assert.ok(html.includes('3 completed tasks preserved'));
+    assert.ok(html.includes('90 / 90 min'));
+    assert.ok(html.includes('&lt;script&gt;untrusted()&lt;/script&gt;'));
+    assert.ok(!html.includes('<script>'), 'Recorded job and prompt text cannot execute');
+    app.evaluate('setData(fixture)');
+    assert.equal(app.evaluate('state.agentProposal'), null, 'Refreshing context invalidates a displayed preview');
+  }
+
+  {
+    const calls = [];
+    const proposal = {job_id:'role-a',fingerprint:'current-state',next_steps:[],changes:[],days:[]};
+    const app = appContext(fixture(), async (url, options) => {
+      calls.push({url,payload:JSON.parse(options.body)});
+      return {ok:true,json:async()=>({ok:true,proposal})};
+    });
+    app.evaluate('render=()=>{};state.prepJob="role-a";');
+    await app.evaluate('previewAgentPlan()');
+    assert.equal(calls.length,1);
+    assert.equal(calls[0].payload.operation,'preview');
+    assert.equal(calls[0].payload.job_id,'role-a');
+    assert.equal(app.evaluate('state.agentProposal.fingerprint'),'current-state');
+    assert.equal(app.evaluate('state.busy'),false);
+    assert.ok(!calls.some(call=>call.payload.operation==='apply'), 'Generation never silently applies the schedule');
+  }
+
+  {
+    const app = appContext(fixture(), async()=>({ok:false,json:async()=>({error:'Workspace is busy. Try again.'})}));
+    app.evaluate('render=()=>{};');
+    await app.evaluate('previewAgentPlan()');
+    app.evaluate('clearTimeout(state.toastTimer)');
+    assert.ok(app.evaluate('renderAgentPlanner()').includes('Workspace is busy. Try again.'), 'Preview errors remain visible with a retry action');
+    app.evaluate('state.agentProposal={job_id:"role-a",fingerprint:"stale"};mutate=async()=>false;');
+    await app.evaluate('applyAgentPlan()');
+    assert.equal(app.evaluate('state.agentProposal'),null,'A failed apply cannot reuse the stale proposal');
+    assert.ok(app.evaluate('renderAgentPlanner()').includes('Generate a fresh preview'));
+  }
+
+  console.log('Preparation UI regressions passed (12 scenarios).');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

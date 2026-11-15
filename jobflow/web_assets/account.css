@@ -2,3 +2,5 @@
 
 /* Match the main workspace masthead without changing account flow layouts. */
 .brand-mark{background:transparent;color:#202026}.brand{color:#202026}.account-header{background:#fff}.account-card{box-shadow:none}
+
+.pending-next{display:block;margin-top:16px}.background-details>.help{margin-top:10px}.upload-list a{font-weight:600}

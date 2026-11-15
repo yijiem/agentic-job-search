@@ -87,3 +87,67 @@
   .jf-trend-footer { padding: 10px 14px; }
 }
 @media(prefers-reduced-motion: reduce) { .jf-trend-series { transition: none; } }
+
+/* Theme tokens also drive SVG series, so switching themes preserves inspection
+   state and selections without rebuilding the chart. */
+html[data-theme="light"] .jf-trend {
+  --trend-bg: #fff; --trend-line: #dce3e8; --trend-muted: #566875;
+  --trend-series-0: #12796e; --trend-series-1: #3d66ba; --trend-series-2: #9c6b0d;
+  --trend-series-3: #8755bf; --trend-series-4: #ba4664; --trend-series-5: #187b9a;
+  --trend-series-6: #668327; --trend-series-7: #ae5b29; --trend-series-8: #3b7e65;
+  --trend-series-9: #a14d91; --trend-series-10: #65789f; --trend-series-11: #827318;
+  --trend-series-12: #1d7b84; --trend-series-13: #715ab8; --trend-series-14: #996343;
+  --trend-series-15: #418365; --trend-series-16: #b24876; --trend-series-17: #748121;
+  --trend-series-18: #446fa5; --trend-series-19: #99713d; --trend-series-lightness: 37%;
+  color: #273642; border-color: var(--trend-line); color-scheme: light;
+}
+html[data-theme="light"] .jf-trend button:focus-visible,
+html[data-theme="light"] .jf-trend summary:focus-visible,
+html[data-theme="light"] .jf-trend input:focus-visible,
+html[data-theme="light"] .jf-trend select:focus-visible,
+html[data-theme="light"] .jf-trend-interaction:focus-visible { outline-color: #33778a; }
+html[data-theme="light"] .jf-trend-summary-label { color: #566875; }
+html[data-theme="light"] .jf-trend-summary strong,
+html[data-theme="light"] .jf-trend-value,
+html[data-theme="light"] .jf-trend-empty strong { color: #24333d; }
+html[data-theme="light"] .jf-trend-summary strong small { color: var(--trend-muted); }
+html[data-theme="light"] .jf-trend-summary-meta b { color: #146d5c; }
+html[data-theme="light"] .jf-trend-presets { background: #f3f5f6; border-color: #d5dee3; }
+html[data-theme="light"] .jf-trend-presets button { color: #566875; }
+html[data-theme="light"] .jf-trend-presets button:hover { color: #24333d; background: #e7eef1; }
+html[data-theme="light"] .jf-trend-presets button[aria-pressed=true] { background: #dcebee; color: #245668; box-shadow: none; }
+html[data-theme="light"] .jf-trend-picker summary,
+html[data-theme="light"] .jf-trend .jf-trend-range select { background: #fff; border-color: #ccd7de; color: #334b5a; }
+html[data-theme="light"] .jf-trend-picker summary:hover,
+html[data-theme="light"] .jf-trend-picker[open] summary { border-color: #7197a5; background: #edf4f6; }
+html[data-theme="light"] .jf-trend-picker summary svg,
+html[data-theme="light"] .jf-trend-chevron { color: #557584; }
+html[data-theme="light"] .jf-trend-selection-count { background: #e6eef1; color: #385568; }
+html[data-theme="light"] .jf-trend-picker-panel { background: #fff; border-color: #c4d1d9; box-shadow: 0 10px 28px #273e4b20; }
+html[data-theme="light"] .jf-trend input.jf-trend-search { background: #fafcfd; border-color: #cbd6dd; color: #24333d; }
+html[data-theme="light"] .jf-trend input.jf-trend-search::placeholder { color: #657986; }
+html[data-theme="light"] .jf-trend-picker-actions button,
+html[data-theme="light"] .jf-trend-picker-footer button { color: #2a657a; }
+html[data-theme="light"] .jf-trend-picker-actions button:hover,
+html[data-theme="light"] .jf-trend-picker-footer button:hover { color: #173f50; }
+html[data-theme="light"] .jf-trend-picker-list,
+html[data-theme="light"] .jf-trend-legend { scrollbar-color: #acbdc7 #f4f7f8; }
+html[data-theme="light"] .jf-trend-option { color: #314957; }
+html[data-theme="light"] .jf-trend-option:hover { background: #edf4f6; }
+html[data-theme="light"] .jf-trend-option input { accent-color: #267a70; }
+html[data-theme="light"] .jf-trend-option small,
+html[data-theme="light"] .jf-trend-picker-footer,
+html[data-theme="light"] .jf-trend-no-results { color: #5a707e; }
+html[data-theme="light"] .jf-trend-picker-footer { border-color: #dce3e8; }
+html[data-theme="light"] .jf-trend-svg text { fill: #5c7180; }
+html[data-theme="light"] .jf-trend-grid { stroke: #dce4e9; }
+html[data-theme="light"] .jf-trend-grid-vertical { stroke: #edf1f4; }
+html[data-theme="light"] .jf-trend-crosshair { stroke: #657f8d; }
+html[data-theme="light"] .jf-trend-tooltip { background: #fffffff8; border-color: #b5c6cf; color: #24333d; box-shadow: 0 7px 24px #273e4b20; }
+html[data-theme="light"] .jf-trend-tooltip-date { border-color: #dce4e9; }
+html[data-theme="light"] .jf-trend-tooltip-date small { color: #5a707e; }
+html[data-theme="light"] .jf-trend-legend-item { color: #3c5362; }
+html[data-theme="light"] .jf-trend-legend-item:hover { background: #f0f6f8; border-color: #d4e1e7; }
+html[data-theme="light"] .jf-trend-legend-item.is-hidden { opacity: .65; }
+html[data-theme="light"] .jf-trend-footer { background: #f5f8fa; color: #59707e; }
+html[data-theme="light"] .jf-trend-empty { color: #59707e; }

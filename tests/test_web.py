@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from jobflow.storage import Store
 from jobflow.web import (JobflowServer, WebError, _run_cli, job_detail,
-                         perform_action, snapshot)
+                         perform_action, profile_summary, snapshot)
 
 
 class WebTests(unittest.TestCase):
@@ -60,6 +60,44 @@ class WebTests(unittest.TestCase):
             self.assertFalse(result['initialized'])
             self.assertEqual(result['jobs'], [])
             self.assertEqual(list(Path(empty).iterdir()), [])
+
+    def test_profile_summary_is_read_only_and_allowlists_nested_evidence(self):
+        path = self.root / 'config/profile.json'
+        profile = {'name': 'Example Candidate', 'headline': 'Systems engineer',
+                   'skills': ['Python', 'C++'], 'resume_sources': ['/private/resume.txt'],
+                   'private_note': 'private top-level metadata',
+                   'evidence': [{'id': 'achievement', 'text': 'Built a system.',
+                                 'tags': ['Python'], 'employer': 'Example',
+                                 'source_url': 'https://example.com/resume',
+                                 'source_path': '/private/source',
+                                 'private_note': 'private nested metadata'},
+                                {'id': 'local', 'text': 'Reviewed local source.',
+                                 'source_url': 'file:///private/resume.txt'}]}
+        path.write_text(json.dumps(profile))
+        before_profile = path.read_bytes()
+        before_records = self.store.db.execute('SELECT * FROM records ORDER BY kind,id').fetchall()
+        result = profile_summary(self.root)['profile']
+        self.assertEqual(result['name'], profile['name'])
+        self.assertEqual(result['headline'], profile['headline'])
+        self.assertEqual(result['skills'], profile['skills'])
+        self.assertEqual(result['evidence'][0], {
+            'id': 'achievement', 'text': 'Built a system.', 'tags': ['Python'],
+            'employer': 'Example', 'source_url': 'https://example.com/resume'})
+        self.assertNotIn('source_url', result['evidence'][1])
+        self.assertNotIn('private', json.dumps(result))
+        self.assertEqual(path.read_bytes(), before_profile)
+        self.assertEqual(self.store.db.execute('SELECT * FROM records ORDER BY kind,id').fetchall(), before_records)
+
+    def test_profile_summary_missing_or_malformed_optional_fields_have_empty_defaults(self):
+        with tempfile.TemporaryDirectory() as empty:
+            self.assertEqual(profile_summary(empty), {
+                'profile': {'name': '', 'headline': '', 'skills': [], 'evidence': []}})
+            self.assertEqual(list(Path(empty).iterdir()), [])
+        path = self.root / 'config/profile.json'
+        path.write_text(json.dumps({'name': None, 'headline': [], 'skills': None,
+                                    'evidence': ['unsupported', {'text': 'Recorded', 'tags': None}]}))
+        self.assertEqual(profile_summary(self.root), {'profile': {
+            'name': '', 'headline': '', 'skills': [], 'evidence': [{'text': 'Recorded', 'tags': []}]}})
 
     def test_tracked_nonmatch_is_visible(self):
         self.store.put('jobs', 'historical', dict(self.job, id='historical', eligible=False, score=0))
@@ -137,6 +175,20 @@ class WebTests(unittest.TestCase):
             if task['status'] not in ('skipped', 'unscheduled'):
                 totals[task['due_date']] = totals.get(task['due_date'], 0) + task['minutes']
         self.assertTrue(all(minutes <= result['settings']['preparation']['daily_minutes'] for minutes in totals.values()))
+
+    def test_agent_preview_and_apply_use_cli_and_reject_stale_plan(self):
+        before = self.store.db.execute('SELECT * FROM records ORDER BY kind,id').fetchall()
+        preview = perform_action(self.root, {'action': 'agent', 'operation': 'preview', 'job_id': 'job-1'})
+        self.assertTrue(preview['ok'])
+        self.assertEqual(self.store.db.execute('SELECT * FROM records ORDER BY kind,id').fetchall(), before)
+        self.assertTrue(preview['proposal']['next_steps'])
+        apply = {'action': 'agent', 'operation': 'apply', 'job_id': 'job-1',
+                 'fingerprint': preview['proposal']['fingerprint']}
+        self.assertTrue(perform_action(self.root, apply)['applied'])
+        self.assertTrue(self.store.all('tasks'))
+        with self.assertRaises(WebError):
+            perform_action(self.root, apply)
+        self.assertEqual(list((self.root / 'inputs/web').iterdir()), [])
 
     def test_cli_application_roundtrip_preserves_notes_metadata_and_submission_time(self):
         self.store.put('applications', 'job-1', {'id': 'job-1', 'job_id': 'job-1', 'stage': 'saved',
@@ -251,6 +303,17 @@ class HttpBoundaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             JobflowServer(('0.0.0.0', 0), self.root, self.assets)
 
+    def test_profile_api_uses_local_origin_boundary_and_does_not_initialize_workspace(self):
+        status, body, headers = self.request('GET', '/api/profile')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {
+            'profile': {'name': '', 'headline': '', 'skills': [], 'evidence': []}})
+        self.assertEqual(dict(headers)['Cache-Control'], 'no-store')
+        self.assertFalse((self.root / 'data').exists())
+        self.assertFalse((self.root / 'config').exists())
+        self.assertEqual(self.request('GET', '/api/profile', headers={'Host': 'evil.example'})[0], 403)
+        self.assertEqual(self.request('GET', '/api/profile', headers={'Origin': 'https://evil.example'})[0], 403)
+
     def test_only_named_font_and_art_assets_are_served(self):
         public = {
             'fonts/dm-serif-display-latin.woff2': (b'wOF2display', 'font/woff2'),
@@ -281,14 +344,22 @@ class HttpBoundaryTests(unittest.TestCase):
         (self.assets / 'fonts/nunito-latin.woff2').symlink_to(private)
         self.assertEqual(self.request('GET', '/fonts/nunito-latin.woff2')[0], 404)
 
-    def test_dashboard_assets_are_named_and_map_policy_is_limited_to_tile_images(self):
+    def test_dashboard_assets_are_named_and_map_policy_is_limited_to_map_origins(self):
         public = {
+            'my-account.js': b'window.JobflowAccount = {};',
+            'my-account.css': b'.my-account {}',
             'trends.js': b'window.JobflowTrends = {};',
+            'resume-controls.js': b'window.JobflowResumeControls = {};',
+            'resume-controls.css': b'.resume-picker {}',
             'trends.css': b'.jf-trend {}',
             'maps.js': b'window.JobflowMaps = {};',
             'maps.css': b'.jf-map {}',
             'vendor/leaflet/leaflet.js': b'window.L = {};',
             'vendor/leaflet/leaflet.css': b'.leaflet-container {}',
+            'vendor/maplibre/maplibre-gl-csp.js': b'window.maplibregl = {};',
+            'vendor/maplibre/maplibre-gl-csp-worker.js': b'self.onmessage = function() {};',
+            'vendor/maplibre/maplibre-gl.css': b'.maplibregl-map {}',
+            'vendor/maplibre/leaflet-maplibre-gl.js': b'window.L.maplibreGL = function() {};',
         }
         for name, payload in public.items():
             target = self.assets / name
@@ -299,22 +370,37 @@ class HttpBoundaryTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(body, payload)
                 self.assertEqual(dict(headers)['X-Content-Type-Options'], 'nosniff')
-        for name in ('vendor/leaflet/private.json', 'vendor/leaflet/leaflet.js.map'):
+                if name.endswith('.js'):
+                    self.assertIn(dict(headers)['Content-Type'],
+                                  ('text/javascript; charset=utf-8', 'application/javascript; charset=utf-8'))
+        for name in ('vendor/leaflet/private.json', 'vendor/leaflet/leaflet.js.map',
+                     'vendor/maplibre/private.json', 'vendor/maplibre/maplibre-gl-csp.js.map',
+                     'vendor/maplibre/unlisted-worker.js'):
             (self.assets / name).write_bytes(b'not-public')
             self.assertEqual(self.request('GET', '/' + name)[0], 404)
         unused_status, unused_body, headers = self.request('GET', '/')
         headers = dict(headers)
         policy = {part.strip().split(' ', 1)[0]: part.strip().split(' ', 1)[1]
                   for part in headers['Content-Security-Policy'].split(';') if part.strip()}
-        self.assertEqual(policy['img-src'].split(), ["'self'", 'data:', 'https://tile.openstreetmap.org'])
+        self.assertEqual(policy['img-src'].split(), ["'self'", 'data:', 'blob:',
+                         'https://tile.openstreetmap.org', 'https://tiles.openfreemap.org'])
         self.assertEqual(policy['script-src'], "'self'")
-        self.assertEqual(policy['connect-src'], "'self'")
+        self.assertEqual(policy['worker-src'], "'self'")
+        self.assertEqual(policy['connect-src'].split(), ["'self'", 'https://tiles.openfreemap.org'])
+        self.assertEqual(policy['default-src'], "'self'")
+        self.assertEqual(policy['font-src'], "'self' blob:")
+        self.assertEqual(policy['base-uri'], "'none'")
+        self.assertEqual(policy['frame-ancestors'], "'none'")
+        self.assertEqual(policy['form-action'], "'self'")
         self.assertEqual(headers['Referrer-Policy'], 'strict-origin-when-cross-origin')
 
     def test_build_version_tracks_chart_map_and_vendored_assets(self):
         previous = json.loads(self.request('GET', '/api/version')[1])['app_build']
         for name in ('trends.js', 'trends.css', 'maps.js', 'maps.css',
-                     'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css'):
+                     'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css',
+                     'vendor/maplibre/maplibre-gl-csp.js',
+                     'vendor/maplibre/maplibre-gl-csp-worker.js',
+                     'vendor/maplibre/maplibre-gl.css', 'vendor/maplibre/leaflet-maplibre-gl.js'):
             target = self.assets / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b'new public presentation asset')

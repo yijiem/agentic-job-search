@@ -12,6 +12,7 @@ from .storage import utcnow
 from .coaching import build_coaching
 from .workflow import ranked_jobs
 from .salary_references import reference_index, salary_reference
+from .locations import COVERAGE_STATUSES, location_catalog, location_reviews, office_locations
 
 
 def atomic_write(path, content):
@@ -102,11 +103,95 @@ def write_company_reports(output, all_jobs, matching_jobs, packets, updated, loc
     return index, paths
 
 
+def write_location_reports(output, jobs, catalog, updated, minimum, research=()):
+    """Export dated evidence and coverage of the current matching population."""
+    def counts(rows):
+        return {
+            'total': len(rows),
+            'with_location_evidence': sum(bool(job['office_locations']) for job in rows),
+            'with_office_refs': sum(any(row['relationship'] == 'company_office'
+                                       for row in job['office_locations']) for job in rows),
+            'with_coordinates': sum(any('latitude' in row and 'longitude' in row
+                                        for row in job['office_locations']) for job in rows),
+            'with_confirmed_jobsite': sum(any(row['relationship'] == 'job_site' and row['worksite_confirmed']
+                                             for row in job['office_locations']) for job in rows),
+        }
+
+    def physical_key(row):
+        return (row['company'].casefold(), re.sub(r'\W', '', row['address'].casefold()))
+
+    groups = {}
+    for job in jobs:
+        groups.setdefault(job['company'], []).append(job)
+    company_counts = [{'company': company, **counts(rows)} for company, rows in
+                      sorted(groups.items(), key=lambda item: item[0].casefold())]
+    directory = location_reviews(research, catalog, groups, jobs=jobs)
+    by_company = {row['company'].casefold(): row for row in directory}
+    for row in company_counts:
+        review = by_company[row['company'].casefold()]
+        row.update(location_status=review['status'], location_reviewed=review['reviewed'],
+                   office_records=review['locations_count'], office_records_with_coordinates=review['coordinates_count'])
+    unresolved = [{'company': row['company'], 'roles_without_location_evidence': row['total'] - row['with_location_evidence']}
+                  for row in company_counts if row['total'] != row['with_location_evidence']]
+    summary = {
+        'generated_at': updated,
+        'scope': {'eligible': True, 'minimum_score': minimum, 'excluded_availability': ['closed']},
+        'definitions': {
+            'company_office': 'Sourced company office reference. Matching company and city do not confirm a role works at this address; remote postings receive no inferred office reference.',
+            'job_site': 'Dated posting evidence explicitly confirms the address for the linked role. Current company, posting URL and city must still match. Refer to observed_at and the source for current terms.',
+            'coordinates': 'A sourced point, not an assertion of entrance accuracy. Census address-range points are approximate; coordinate_method, coordinate_note and precision describe the evidence.',
+            'unresolved_companies': 'Companies with one or more current matching roles lacking compatible location evidence. Unresolved roles retain their original employer location string.',
+            'company_status': 'Company coverage is independent of role assignment: verified means a sourced office with coordinates; address_only means a sourced address awaiting coordinates; remote_only means a sourced company-wide remote review with no office record; unverified means no validated office or remote-only evidence. Job-site-only evidence counts only while a current matching posting still confirms it. Reviewed counts include completed research with an unresolved outcome.',
+            'catalog': 'Catalog totals include retained dated evidence, including job sites no longer attached to a current matching posting. Such stale job sites do not contribute to current company or role coverage.',
+        },
+        **counts(jobs),
+        'companies_total': len(company_counts),
+        'companies_with_location_evidence': sum(row['with_location_evidence'] > 0 for row in company_counts),
+        'companies_reviewed': sum(row['reviewed'] for row in directory),
+        'company_status_counts': {status: sum(row['status'] == status for row in directory) for status in COVERAGE_STATUSES},
+        'company_reviews': directory,
+        'catalog': {
+            'records': len(catalog),
+            'companies': len({row['company'].casefold() for row in catalog}),
+            'physical_locations': len({physical_key(row) for row in catalog}),
+            'records_with_coordinates': sum('latitude' in row and 'longitude' in row for row in catalog),
+            'physical_locations_with_coordinates': len({physical_key(row) for row in catalog if 'latitude' in row and 'longitude' in row}),
+        },
+        'company_counts': company_counts,
+        'unresolved_companies': unresolved,
+        'addresses_without_coordinates': [row['id'] for row in catalog if 'latitude' not in row or 'longitude' not in row],
+    }
+    atomic_write(output / 'locations.json', json.dumps(catalog, indent=2, ensure_ascii=False) + '\n')
+    atomic_write(output / 'location_reviews.json', json.dumps(directory, indent=2, ensure_ascii=False) + '\n')
+    atomic_write(output / 'location_enrichment.json', json.dumps(summary, indent=2, ensure_ascii=False) + '\n')
+    lines = ['# Employer location coverage', '', 'Updated: ' + updated, '',
+             'Current eligible roles at score %s or above, excluding confirmed closed listings. Missing listings remain visible.' % minimum, '',
+             '%s matching roles; %s have compatible location evidence, %s have sourced coordinates, and %s have a posting-confirmed worksite.' % (
+                 summary['total'], summary['with_location_evidence'], summary['with_coordinates'], summary['with_confirmed_jobsite']), '',
+             '%s evidence records cover %s physical locations at %s companies. %s physical locations have coordinates.' % (
+                 summary['catalog']['records'], summary['catalog']['physical_locations'], summary['catalog']['companies'], summary['catalog']['physical_locations_with_coordinates']), '']
+    lines += [value + '\n' for value in summary['definitions'].values()]
+    lines += ['%s of %s companies have reviewed location evidence: %s with coordinates, %s address-only, %s remote-only, and %s unverified.' % (
+        summary['companies_reviewed'], summary['companies_total'],
+        summary['company_status_counts']['verified'], summary['company_status_counts']['address_only'],
+        summary['company_status_counts']['remote_only'], summary['company_status_counts']['unverified']), '',
+        '[Company location reviews](location_reviews.json) retains dated sources and unresolved outcomes.', '']
+    lines += ['[Location evidence](locations.json) includes source URLs and observation dates. [Complete job export](jobs.json) preserves employer location strings and includes derived `office_locations`.', '',
+              '| Company | Company address status | Matching roles | With location evidence | Office references | Coordinates | Confirmed worksite |',
+              '|---|---|---:|---:|---:|---:|---:|']
+    lines += ['| %s | %s | %s | %s | %s | %s | %s |' % (
+        cell(row['company']), row['location_status'], row['total'], row['with_location_evidence'], row['with_office_refs'], row['with_coordinates'], row['with_confirmed_jobsite']) for row in company_counts]
+    atomic_write(output / 'location_enrichment.md', '\n'.join(lines) + '\n')
+
+
 def write_reports(root, store, config):
     output = Path(root) / 'reports'
     all_jobs = store.all('jobs')
-    salary_index = reference_index(store.all('research'))
-    all_jobs = [{**job, 'levels_fyi': salary_reference(job, salary_index)} for job in all_jobs]
+    research = store.all('research')
+    salary_index = reference_index(research)
+    locations = location_catalog(research)
+    all_jobs = [{**job, 'levels_fyi': salary_reference(job, salary_index),
+                 'office_locations': office_locations(job, locations)} for job in all_jobs]
     by_id = {job['id']: job for job in all_jobs}
     jobs = [by_id[job['id']] for job in ranked_jobs(store, config)]
     matching_ids = {job['id'] for job in jobs}
@@ -115,6 +200,7 @@ def write_reports(root, store, config):
     packet_ids = {packet['id'] for packet in packets}
     local_zone = ZoneInfo(config.get('schedule', {}).get('timezone', 'America/Los_Angeles'))
     updated = datetime.fromisoformat(utcnow()).astimezone(local_zone).isoformat()
+    write_location_reports(output, jobs, locations, updated, config['search']['min_score'], research)
     company_index, paths = write_company_reports(
         output, all_jobs, jobs, packets, updated, local_zone)
     lines = ['# Job search review', '', 'Updated: ' + updated, '',
@@ -122,6 +208,7 @@ def write_reports(root, store, config):
         'Posted base pay is not total compensation; unverified TC stays visible.', '']
     lines += ['Levels.fyi links are reported salary benchmarks. A level-specific link is used only for a verified '
               'grade explicitly named in the job title; other links show all levels, all roles, or the company directory.', '']
+    lines += ['[Employer address evidence and coverage](location_enrichment.md) distinguishes company office references from posting-confirmed worksites.', '']
     lines += company_index
     lines += ['', '## Source coverage', '', '| Source | State | Detail |', '|---|---|---|']
     for source in store.all('source_health'):

@@ -215,9 +215,10 @@ def build_role_guide(job, config, research_records=()):
     }
     company_key = company.strip().casefold()
     research = [copy.deepcopy(row) for row in research_records
-                if (job_id and str(row.get("job_id") or "") == job_id) or
+                if row.get("kind") not in ("company_location", "company_location_review") and
+                ((job_id and str(row.get("job_id") or "") == job_id) or
                 (not row.get("job_id") and row.get("company") and
-                 str(row["company"]).strip().casefold() == company_key)]
+                 str(row["company"]).strip().casefold() == company_key))]
     return {
         "job_id": job_id, "company": company, "title": title,
         "summary": "Start preparing for this role before an interview is scheduled. "

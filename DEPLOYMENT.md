@@ -59,7 +59,7 @@ Choose the email you will use for the owner account. The app does **not** give t
 On your Mac, from the current repository, make a consistent private snapshot outside its inputs/reports directories. Replace the source path if your checkout moved; the output directory must be absent or empty:
 
 ```sh
-python3 -m jobflow --root /path/to/agentic-job-search cloud export-owner --output "$HOME/jobflow-owner-transfer"
+python3 -m jobflow --root /absolute/path/to/agentic-job-search cloud export-owner --output "$HOME/jobflow-owner-transfer"
 ```
 
 This uses the SQLite backup API under the workflow lock and copies the exact profile/settings plus allowlisted private input/report files. Review the reported record counts and skipped files. It does not rescore jobs, recreate completed tasks, or overwrite the source. It excludes the account registry, session data, and credential files.

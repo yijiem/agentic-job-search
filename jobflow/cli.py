@@ -31,6 +31,13 @@ def parser():
     web = commands.add_parser('web', help='Open the local job-search web application')
     web.add_argument('--port', type=int, default=8765, help='Loopback port (default: 8765)')
     web.add_argument('--open', action='store_true', help='Open the application in your browser')
+    batch = commands.add_parser('batch', help='Manage Codex application batches')
+    batch_input = batch.add_mutually_exclusive_group(required=True)
+    batch_input.add_argument('--request', type=Path, help='JSON batch action request file; use - for stdin')
+    batch_input.add_argument('--codex-run', help='Read and connect to a prepared Codex run')
+    batch.add_argument('--worker-id', help='Unique runner ID to retain throughout the Codex run')
+    agent = commands.add_parser('agent', help='Preview or apply an evidence-grounded preparation plan')
+    agent.add_argument('--request', type=Path, required=True, help='JSON planning request file')
     for name in ('run', 'search', 'personalize', 'prep', 'discover'):
         command = commands.add_parser(name)
         command.add_argument('--research', action='store_true', help='Enable bounded model web research')
@@ -146,7 +153,52 @@ def dispatch(args, store, config, profile):
         return
     research = make_researcher(store, config, getattr(args, 'research', False)) if command in (
         'run', 'search', 'personalize', 'prep', 'discover') else None
-    if command == 'run':
+    if command == 'agent':
+        from .agentic import perform_agentic_action
+        if args.request.stat().st_size > 256 * 1024:
+            raise ValueError('The planning request is too large.')
+        payload = json.loads(args.request.read_text(encoding='utf-8'))
+        result = perform_agentic_action(store, config, profile, payload)
+        if result.get('applied'):
+            try:
+                coach(store, config)
+                write_reports(root, store, config)
+            except (ValueError, OSError, RuntimeError, KeyError):
+                result['warning'] = 'Plan saved. Refresh coaching and reports with the CLI.'
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    if command == 'batch':
+        from .application_batches import perform_batch_action, workspace_id
+        if args.codex_run:
+            if not args.worker_id:
+                raise ValueError('Use --worker-id with a unique ID for this Codex run; retain it when resuming.')
+            payload = {'op': 'codex_context', 'run_id': args.codex_run,
+                       'worker_id': args.worker_id, 'workspace_id': workspace_id(root)}
+        else:
+            if str(args.request) == '-':
+                encoded = sys.stdin.buffer.read(8 * 1024 * 1024 + 1)
+                if len(encoded) > 8 * 1024 * 1024:
+                    raise ValueError('The batch request is too large.')
+                payload = json.loads(encoded.decode('utf-8'))
+            else:
+                if args.request.stat().st_size > 8 * 1024 * 1024:
+                    raise ValueError('The batch request is too large.')
+                payload = json.loads(args.request.read_text(encoding='utf-8'))
+        result = perform_batch_action(root, store, config, profile, payload)
+        if str(payload.get('op', '')).startswith('codex_'):
+            result.setdefault('workspace_id', workspace_id(root))
+        if result.pop('application_updated', False):
+            try:
+                prepare(store, config, profile)
+                coach(store, config)
+                write_reports(root, store, config)
+            except (ValueError, OSError, RuntimeError, KeyError):
+                # The receipt and application were committed together already;
+                # report projection errors must never invite a second submit.
+                result['warning'] = 'Submission saved. Refresh preparation and reports with the CLI.'
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    elif command == 'run':
         print(json.dumps(run(store, config, profile, research), indent=2))
     elif command == 'search':
         print(json.dumps(search(store, config, profile, source_ids=args.source_ids), indent=2))

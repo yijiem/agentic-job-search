@@ -9,7 +9,7 @@ Release source: <https://github.com/Leaflet/Leaflet/tree/v1.9.4>
 `leaflet.js`, `leaflet.css`, and standard images are served locally; the app
 requires no CDN JavaScript and does not need an API key.
 
-The map requests only visible street tiles from
+Leaflet manages the city markers and controls. The default vector basemap is described in [the MapLibre vendor notes](../maplibre/README.md). When vector rendering is unavailable, the explicitly labelled fallback requests only visible street tiles from
 `https://tile.openstreetmap.org/{z}/{x}/{y}.png`, with standard browser caching
 and origin-only referrers. It does not prefetch regions or support offline tile
 exports. Geographic tiles are separate from private role records: company names,

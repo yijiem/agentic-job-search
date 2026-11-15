@@ -19,7 +19,7 @@ flowchart TD
   U --> DB
 ```
 
-The orchestrator runs source requests concurrently and passes durable records between agents. Agents are separate Python modules with testable contracts. Model-backed public research is optional. Human review controls sending, applications, and final resume edits; this program contains no message-sending or application-submission tool.
+The orchestrator runs source requests concurrently and passes durable records between agents. Agents are separate Python modules with testable contracts. Model-backed public research is optional. Human review controls sending, applications, and final resume edits. The search orchestrator never submits applications; Codex can operate employer pages for explicitly authorized batch runs. The website prepares a local desktop handoff, and the CLI owns run reservations, reviewed snapshots, one-time submission grants, and confirmed results. See [the Codex application workflow](CODEX_APPLICATIONS.md). The former extension cannot claim new work. No message-sending tool is included.
 
 `jobs`, `source_health`, `packets`, `contacts`, `applications`, `interviews`, `tasks`, `activities`, `coaching`, `research`, `candidates`, and `schedule` are versionable JSON records in SQLite. Every record has stable identity and created/updated timestamps. Submission and completion timestamps are separate evidence; storage timestamps never establish when work happened. Agent failures remain visible in the `runs` table. Reports are replaceable projections of that state; imports preserve task metadata and user completion.
 
@@ -48,5 +48,5 @@ Discovery should be a bounded exploration loop, not an unrestricted crawler:
 - Model output is sourced research, not an automatically verified contact graph or a resume fact source.
 - Resume drafts select and reorder grounded achievements. They are review Markdown, not publication-ready PDF/LaTeX replacements.
 - Generic preparation is usable without an interview schedule. Past company questions require dated, accessible firsthand sources and remain anecdotal.
-- No email is sent, no application is submitted, and the upstream resume repository is not modified.
+- No email is sent and the upstream resume repository is not modified. Applications are submitted through Codex browser controls for explicitly authorized runs; the daily scheduler performs no submissions. New extension claims are disabled, while historical in-flight receipts can still be reconciled.
 - SQLite and local files suit a personal workflow. An always-on multi-user service would need a server database, durable task queue, authentication, scheduled workers, and a secrets manager.

@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .reports import atomic_write
+from .locations import validate_company_location, validate_location_review
 
 STAGES = ('saved', 'applied', 'recruiter', 'technical', 'onsite', 'offer', 'rejected', 'withdrawn')
 STATUSES = ('todo', 'doing', 'done', 'skipped', 'unscheduled')
@@ -41,6 +42,8 @@ def valid_url(value):
 
 def validate_record(kind, row, store):
     row = dict(row)
+    if kind == 'research' and row.get('kind') in ('company_location', 'company_location_review') and not row.get('id'):
+        raise ValueError('Company location research requires an explicit id.')
     if kind == 'jobs':
         for key in ('company', 'title', 'url', 'description', 'location'):
             if not row.get(key):
@@ -130,9 +133,13 @@ def validate_record(kind, row, store):
         if not any(valid_url(row.get(k, '')) for k in ('profile_url', 'evidence_url')):
             raise ValueError('Contacts need a public professional profile or evidence URL.')
     elif kind == 'research':
+        if row.get('kind') == 'company_location':
+            row = validate_company_location(row, lambda job_id: store.get('jobs', job_id))
+        elif row.get('kind') == 'company_location_review':
+            row = validate_location_review(row, lambda location_id: store.get('research', location_id))
         if not row.get('text') or not isinstance(row.get('sources'), list) or not row['sources']:
             raise ValueError('Research needs text and a nonempty list of source objects.')
-        if not all(valid_url(s.get('url', '')) for s in row['sources']):
+        if not all(isinstance(s, dict) and isinstance(s.get('url'), str) and valid_url(s['url']) for s in row['sources']):
             raise ValueError('Research sources need HTTP(S) URLs.')
         row.setdefault('mode', 'imported_research_requires_review')
     return row

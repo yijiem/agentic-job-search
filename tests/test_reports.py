@@ -210,7 +210,57 @@ class CompanyReportTests(unittest.TestCase):
             self.assertIn('levels_fyi', job)
             self.assertEqual(job['levels_fyi']['scope'], 'directory')
         self.assertEqual({job["id"]: job for job in (first, second, excluded, closed)},
-                         {job["id"]: {k: v for k, v in job.items() if k != 'levels_fyi'} for job in exported})
+                         {job["id"]: {k: v for k, v in job.items() if k not in ('levels_fyi', 'office_locations')} for job in exported})
+
+    def test_location_exports_separate_office_references_from_confirmed_roles_and_history(self):
+        from tests.test_locations import office, with_coordinates
+        confirmed = self.add_job('confirmed', company='Example')
+        self.add_job('same-city', company='Example')
+        self.add_job('remote', company='Example', remote=True)
+        self.add_job('other-city', company='Example', location='Menlo Park, CA')
+        self.add_job('no-evidence', company='Other')
+        self.add_job('missing-visible', company='Example', availability='missing')
+        self.add_job('address-only', company='Address Only')
+        self.add_job('closed-history', company='Example', availability='closed')
+        self.add_job('ineligible', company='Example', eligible=False)
+        self.add_job('low-score', company='Example', score=39)
+        rows = [with_coordinates(), office(id='address-only', company='Address Only'),
+                with_coordinates(id='explicit-site', relationship='job_site', job_ids=['confirmed'],
+                                 sources=[{'url': 'https://example.com/contact'}, {'url': 'https://example.com/map'},
+                                          {'url': confirmed['url']}], private_metadata='do-not-project')]
+        for row in rows:
+            self.store.put('research', row['id'], row)
+        self.store.put('research', 'invalid-location', office(id='invalid-location', latitude=400, longitude=0))
+        before = [tuple(row) for row in self.store.db.execute('SELECT * FROM records ORDER BY kind,id')]
+        self.render()
+        catalog = json.loads((self.root / 'reports/locations.json').read_text())
+        exported = json.loads((self.root / 'reports/jobs.json').read_text())
+        coverage = json.loads((self.root / 'reports/location_enrichment.json').read_text())
+        self.assertEqual(coverage['total'], 7)
+        self.assertEqual(coverage['with_location_evidence'], 4)
+        self.assertEqual(coverage['with_office_refs'], 4)
+        self.assertEqual(coverage['with_coordinates'], 3)
+        self.assertEqual(coverage['with_confirmed_jobsite'], 1)
+        self.assertEqual(coverage['catalog'], {'records': 3, 'companies': 2, 'physical_locations': 2,
+                                             'records_with_coordinates': 2, 'physical_locations_with_coordinates': 1})
+        self.assertEqual(coverage['companies_total'], 3)
+        self.assertEqual(coverage['companies_with_location_evidence'], 2)
+        self.assertEqual(coverage['unresolved_companies'], [
+            {'company': 'Example', 'roles_without_location_evidence': 2},
+            {'company': 'Other', 'roles_without_location_evidence': 1}])
+        self.assertEqual(coverage['addresses_without_coordinates'], ['address-only'])
+        self.assertIn('do not confirm', coverage['definitions']['company_office'])
+        self.assertNotIn('do-not-project', json.dumps(catalog))
+        self.assertEqual(len(exported), 10)
+        by_id = {job['id']: job for job in exported}
+        self.assertEqual(len(by_id['confirmed']['office_locations']), 2)
+        self.assertEqual(by_id['confirmed']['location'], confirmed['location'])
+        self.assertEqual(by_id['remote']['office_locations'], [])
+        self.assertEqual(by_id['other-city']['office_locations'], [])
+        self.assertEqual(by_id['confirmed']['office_locations'][0]['observed_at'], '2026-11-14')
+        self.assertIn('location_enrichment.md', (self.root / 'reports/review.md').read_text())
+        self.assertIn('Census address-range points are approximate', (self.root / 'reports/location_enrichment.md').read_text())
+        self.assertEqual(before, [tuple(row) for row in self.store.db.execute('SELECT * FROM records ORDER BY kind,id')])
 
     def test_salary_links_in_company_review_and_json_use_saved_references(self):
         job = self.add_job('robinhood-l3', company='Robinhood', title='Software Engineer (L3)')
@@ -234,6 +284,33 @@ class CompanyReportTests(unittest.TestCase):
         self.assertNotIn('levels_fyi', saved)
         self.assertEqual(exported['levels_fyi']['scope'], 'level')
         self.assertEqual(exported['compensation'], saved['compensation'])
+
+    def test_location_directory_reports_every_matching_company_even_without_role_coordinates(self):
+        from test_locations import office, review, with_coordinates
+        for company in ('Example', 'Address', 'Remote', 'Unresolved', 'Not Reviewed'):
+            self.add_job(company.lower().replace(' ', '-'), company=company, location='Remote - US', remote=True)
+        self.add_job('closed', company='Closed', availability='closed')
+        self.add_job('low-score', company='Low Score', score=39)
+        evidence = [with_coordinates(), office(id='address', company='Address'), review(),
+                    review(id='remote-review', company='Remote', status='remote_only', location_ids=[]),
+                    review(id='unresolved-review', company='Unresolved', status='unverified', location_ids=[],
+                           private_metadata='not-in-directory')]
+        for row in evidence:
+            self.store.put('research', row['id'], row)
+        self.render()
+        output = self.root / 'reports'
+        report = json.loads((output / 'location_enrichment.json').read_text())
+        directory = json.loads((output / 'location_reviews.json').read_text())
+        self.assertEqual(report['companies_total'], 5)
+        self.assertEqual(report['companies_reviewed'], 4)
+        self.assertEqual(report['company_status_counts'], {'verified': 1, 'address_only': 1, 'remote_only': 1, 'unverified': 2})
+        self.assertEqual(report['with_coordinates'], 0)
+        self.assertEqual(report['companies_with_location_evidence'], 0)
+        self.assertEqual(report['company_reviews'], directory)
+        self.assertEqual(len(directory), 5)
+        self.assertNotIn('not-in-directory', json.dumps(report))
+        self.assertIn('5 companies', (output / 'location_enrichment.md').read_text())
+        self.assertIn('address_only', (output / 'location_enrichment.md').read_text())
 
 
 if __name__ == "__main__":

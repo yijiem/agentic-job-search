@@ -1,3 +1,4 @@
+import base64
 import fcntl
 import hashlib
 import json
@@ -270,6 +271,65 @@ class CloudAccountsTests(unittest.TestCase):
                 self.accounts.adopt('owner@example.com', source)
         self.assertFalse(self.accounts.workspace(self.accounts.lookup_email('owner@example.com')).exists())
         self.assertEqual(list(self.accounts.workspaces.iterdir()), [])
+
+    def test_export_and_adoption_retain_immutable_resume_library_files(self):
+        from jobflow.application_batches import perform_batch_action, resume_content
+        source = self.source()
+        store = Store(source / 'data/jobflow.sqlite3')
+        originals = []
+        for filename, content in (('original.pdf', b'%PDF-1.7\nOriginal resume\n%%EOF'),
+                                  ('revision.pdf', b'%PDF-1.7\nReviewed revision\n%%EOF')):
+            result = perform_batch_action(source, store, {}, {}, {'op': 'upload_resume', 'filename': filename,
+                'content_base64': base64.b64encode(content).decode()})['resume']
+            originals.append((result, content))
+        revision = originals[1][0]
+        revision.update(parent_resume_id=originals[0][0]['id'], version=2,
+                        source={'kind': 'pdf_review', 'review_id': 'review-test', 'layout': 'reflowed'})
+        store.put('application_resumes', revision['id'], revision)
+        store.close()
+        portable = self.root / 'library-export'
+        summary = export_workspace(source, portable)
+        self.assertEqual(summary['skipped_files'], [])
+        self.assertEqual(summary['counts']['application_resumes'], 2)
+        account = self.accounts.invite('owner@example.com')
+        self.accounts.adopt(account['email'], portable)
+        adopted = self.accounts.workspace(account)
+        for root in (portable, adopted):
+            for metadata, content in originals:
+                with self.subTest(root=root, resume=metadata['filename']):
+                    copied, actual = resume_content(root, metadata['id'])
+                    self.assertEqual(actual, content)
+                    self.assertEqual(copied, metadata)
+                    self.assertEqual((root / 'inputs/application-resumes' / metadata['id']).stat().st_mode & 0o777, 0o600)
+
+    def test_resume_export_exception_excludes_unknown_files_paths_and_symlinks(self):
+        source = self.source()
+        library = source / 'inputs/application-resumes'
+        library.mkdir()
+        unknown = 'resume-' + '1' * 32
+        changed = 'resume-' + '2' * 32
+        linked = 'resume-' + '3' * 32
+        (library / unknown).write_bytes(b'unregistered file')
+        (library / changed).write_bytes(b'changed bytes')
+        (library / linked).symlink_to(source / 'config/profile.json')
+        (library / 'resume-short').write_bytes(b'invalid ID')
+        (source / 'inputs' / unknown).write_bytes(b'wrong directory')
+        (source / 'reports' / unknown).write_bytes(b'wrong tree')
+        nested = library / 'nested'
+        nested.mkdir()
+        (nested / unknown).write_bytes(b'wrong depth')
+        store = Store(source / 'data/jobflow.sqlite3')
+        store.put('application_resumes', changed, {'id': changed, 'size': len(b'changed bytes'),
+                  'sha256': hashlib.sha256(b'original data').hexdigest()})
+        store.close()
+        destination = self.root / 'safe-library-export'
+        summary = export_workspace(source, destination)
+        for relative in ('inputs/application-resumes/' + unknown, 'inputs/application-resumes/' + changed,
+                         'inputs/application-resumes/' + linked, 'inputs/application-resumes/resume-short',
+                         'inputs/' + unknown, 'reports/' + unknown, 'inputs/application-resumes/nested/' + unknown):
+            with self.subTest(relative=relative):
+                self.assertFalse((destination / relative).exists())
+                self.assertTrue(any(entry.startswith(relative + ' (') for entry in summary['skipped_files']))
 
     def test_export_includes_committed_wal_state_without_assigning_identity(self):
         source = self.source()

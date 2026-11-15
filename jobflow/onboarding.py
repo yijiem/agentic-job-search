@@ -220,7 +220,7 @@ def _uploads(root):
             # Large extracted bodies are returned only by the upload call.
             result.append({key: value.get(key) for key in (
                 'id', 'filename', 'original_name', 'uploaded_at', 'size',
-                'extraction_status', 'message', 'sha256')})
+                'extraction_status', 'message', 'sha256', 'application_resume_id')})
     return sorted(result, key=lambda item: item.get('uploaded_at', ''), reverse=True)
 
 
@@ -240,11 +240,16 @@ def onboarding_state(root):
         except (ValueError, KeyError, TypeError, OSError):
             pass
     metadata = _read_json(root / 'config/onboarding.json', {})
+    from .resumes import resume_library
+    library = resume_library(root)
     return {
         'complete': bool(complete),
         'profile': {key: copy.deepcopy(profile[key]) for key in PROFILE_FIELDS if key in profile},
         'preferences': _preferences(settings),
         'uploads': _uploads(root),
+        'applicant': library['applicant'],
+        'resumes': library['resumes'],
+        'default_resume_id': library['default_resume_id'],
         'source_count': sum(1 for source in settings.get('sources', [])
                             if source.get('enabled', True) and source.get('kind') != 'manual'),
         'existing_data_reused': bool(complete),
@@ -377,7 +382,15 @@ def upload_resume(root, filename, content_bytes):
         content_path = directory / (upload_id + extension)
         _write_private(content_path, content_bytes)
         try:
-            _write_private(directory / (upload_id + '.json'), metadata_bytes)
+            from .resumes import import_resume
+            store = Store(root / 'data/jobflow.sqlite3')
+            try:
+                saved = import_resume(root, store, filename, content_bytes,
+                                      {'kind': 'onboarding', 'upload_id': upload_id})
+                value['application_resume_id'] = saved['id']
+            finally:
+                store.close()
+            _write_private(directory / (upload_id + '.json'), _json_bytes(value))
         except Exception:
             content_path.unlink()
             raise
@@ -505,8 +518,12 @@ def _merged_preferences(previous, changes):
 def save_onboarding(root, payload):
     """Save explicitly reviewed profile/preferences without rewriting history."""
     root = _root_path(root)
-    if not isinstance(payload, dict) or set(payload) - {'profile', 'preferences'}:
-        raise ValueError('Send profile and preferences objects.')
+    if not isinstance(payload, dict) or set(payload) - {'profile', 'preferences', 'applicant'}:
+        raise ValueError('Send profile, preferences, and applicant objects.')
+    applicant = None
+    if 'applicant' in payload:
+        from .resumes import validate_applicant
+        applicant = validate_applicant(payload['applicant'])
     with _workspace_lock(root):
         profile_path = root / 'config/profile.json'
         settings_path = root / 'config/settings.json'
@@ -538,4 +555,12 @@ def save_onboarding(root, payload):
             _write_private(settings_path, old_settings_bytes)
             raise
         _write_private(metadata_path, _json_bytes(metadata))
+        if applicant is not None:
+            from .resumes import perform_resume_action
+            store = Store(root / 'data/jobflow.sqlite3')
+            try:
+                perform_resume_action(root, store, settings, profile,
+                                      {'op': 'resume_profile', 'applicant': applicant})
+            finally:
+                store.close()
     return onboarding_state(root)

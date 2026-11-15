@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import stat
 import tempfile
 import time
 import uuid
@@ -28,6 +29,7 @@ SESSION_SECONDS = 12 * 60 * 60
 _EMAIL = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,63}$")
 _COPY_EXTENSIONS = {'.json', '.csv', '.tsv', '.md', '.txt', '.pdf', '.docx', '.xlsx', '.html',
                     '.tex', '.cls', '.sty', '.bib', '.diff', '.patch', '.png', '.jpg', '.jpeg', '.webp'}
+_RESUME_FILE = re.compile(r'^resume-[0-9a-f]{32}$')
 _SECRET_NAME = re.compile(r'(?:^|[._-])(?:credentials?|secrets?|tokens?|api[_-]?keys?)(?:[._-]|$)', re.I)
 _SECRET_JSON = re.compile(rb'"(?:access_token|refresh_token|client_secret|api_key|private_key|password)"\s*:', re.I)
 
@@ -298,7 +300,7 @@ class Accounts:
                 'counts': receipt['counts'], 'skipped_files': receipt['skipped_files']}
 
     @staticmethod
-    def _copy_private_tree(source, destination, label, skipped):
+    def _copy_private_tree(source, destination, label, skipped, resume_files=None):
         if source.is_symlink():
             skipped.append(label + ' (symbolic link)')
             return
@@ -315,7 +317,30 @@ class Accounts:
             elif path.name.startswith('.') or _SECRET_NAME.search(path.name):
                 skipped.append(relative + ' (excluded private credential name)')
             elif path.is_dir():
-                Accounts._copy_private_tree(path, destination / path.name, relative, skipped)
+                Accounts._copy_private_tree(path, destination / path.name, relative, skipped, resume_files)
+            elif label == 'inputs/application-resumes' and _RESUME_FILE.fullmatch(path.name):
+                # Library storage is intentionally extensionless. Only copy a
+                # known immutable resume that agrees with the backed-up record;
+                # this does not broaden the general private-file allowlist.
+                metadata = (resume_files or {}).get(path.name)
+                content = None
+                if metadata:
+                    try:
+                        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+                        descriptor = os.open(str(path), flags)
+                        with os.fdopen(descriptor, 'rb') as stream:
+                            details = os.fstat(stream.fileno())
+                            if stat.S_ISREG(details.st_mode) and details.st_size == metadata['size']:
+                                content = stream.read(metadata['size'] + 1)
+                    except OSError:
+                        pass
+                if (content is None or len(content) != metadata['size'] or
+                        hashlib.sha256(content).hexdigest() != metadata['sha256']):
+                    skipped.append(relative + ' (resume metadata or integrity mismatch)')
+                    continue
+                target = destination / path.name
+                target.write_bytes(content)
+                target.chmod(0o600)
             elif not path.is_file() or path.suffix.lower() not in _COPY_EXTENSIONS:
                 skipped.append(relative + ' (unsupported file type)')
             elif path.suffix.lower() == '.json' and _SECRET_JSON.search(path.read_bytes()):
@@ -379,12 +404,19 @@ def export_workspace(source, destination_directory):
                     raise ValueError('The copied workspace database did not pass its integrity check.')
                 counts = dict(backup.execute('SELECT kind,COUNT(*) FROM records GROUP BY kind'))
                 counts['runs'] = backup.execute('SELECT COUNT(*) FROM runs').fetchone()[0]
+                resume_files = {}
+                for identifier, body in backup.execute("SELECT id,body FROM records WHERE kind='application_resumes'"):
+                    row = json.loads(body)
+                    if (isinstance(row, dict) and _RESUME_FILE.fullmatch(identifier) and row.get('id') == identifier and
+                            type(row.get('size')) is int and 0 < row['size'] <= 5 * 1024 * 1024 and
+                            isinstance(row.get('sha256'), str) and re.fullmatch(r'[0-9a-f]{64}', row['sha256'])):
+                        resume_files[identifier] = {'size': row['size'], 'sha256': row['sha256']}
             finally:
                 backup.close()
                 original.close()
             skipped = []
             for name in ('inputs', 'reports'):
-                Accounts._copy_private_tree(source / name, stage / name, name, skipped)
+                Accounts._copy_private_tree(source / name, stage / name, name, skipped, resume_files)
             if destination.exists():
                 destination.rmdir()
             os.replace(str(stage), str(destination))

@@ -51,8 +51,8 @@
     // Rank assigns the ten default series distinct curated colors. The mapping
     // stays stable while filtering, searching, and toggling this dataset.
     const index = dataset.colorIndexes?.get(name) ?? 0;
-    if (index < palette.length) return palette[Math.max(0, index)];
-    return `hsl(${Math.round((index * 137.508 + 160) % 360)} 63% 70%)`;
+    if (index < palette.length) return `var(--trend-series-${index}, ${palette[Math.max(0, index)]})`;
+    return `hsl(${Math.round((index * 137.508 + 160) % 360)} 63% var(--trend-series-lightness, 70%))`;
   }
 
   function valuesAt(at) {
@@ -111,7 +111,7 @@
     const dates = [...new Set(Array.from({length: tickCount}, (_, i) => m.first + Math.round((m.last - m.first) / DAY * (tickCount === 1 ? 0 : i / (tickCount - 1))) * DAY))];
     const paths = m.companies.map(name => {
       const path = m.rows.map((row, index) => `${index ? 'H' + m.x(row.at).toFixed(2) + 'V' : 'M' + m.x(row.at).toFixed(2) + ','}${m.y(row.companies[name] || 0).toFixed(2)}`).join('');
-      return `<g class="jf-trend-series" data-trend-series="${esc(name)}"><path d="${path}" fill="none" stroke="${color(name)}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/><circle cx="${m.x(m.last)}" cy="${m.y(m.latest[name] || 0)}" r="3" fill="${color(name)}" stroke="#101a21" stroke-width="1.5"/><title>${esc(name)}: ${fmt(m.latest[name])} cumulative discoveries</title></g>`;
+      return `<g class="jf-trend-series" data-trend-series="${esc(name)}"><path d="${path}" fill="none" stroke="${color(name)}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/><circle cx="${m.x(m.last)}" cy="${m.y(m.latest[name] || 0)}" r="3" fill="${color(name)}" stroke="var(--trend-bg, #101a21)" stroke-width="1.5"/><title>${esc(name)}: ${fmt(m.latest[name])} cumulative discoveries</title></g>`;
     }).join('');
     return `<svg class="jf-trend-svg" viewBox="0 0 ${m.w} ${m.h}" preserveAspectRatio="none" role="img" aria-label="Cumulative discoveries by company from ${dateLabel(m.first, true)} to ${dateLabel(m.last, true)}. Values are also available in the company legend.">
       ${ticks.map(value => `<line class="jf-trend-grid" x1="${m.left}" x2="${m.w - m.right}" y1="${m.y(value)}" y2="${m.y(value)}"/><text class="jf-trend-axis" x="${m.left - 10}" y="${m.y(value) + 4}" text-anchor="end">${fmt(value)}</text>`).join('')}
@@ -177,7 +177,7 @@
     cursor.removeAttribute('hidden');
     cursor.querySelector('line').setAttribute('x1', x);
     cursor.querySelector('line').setAttribute('x2', x);
-    cursor.querySelector('.jf-trend-cursor-dots').innerHTML = model.companies.map(name => `<circle cx="${x}" cy="${model.y(values[name] || 0)}" r="3.5" fill="${color(name)}" stroke="#101a21" stroke-width="1.5"/>`).join('');
+    cursor.querySelector('.jf-trend-cursor-dots').innerHTML = model.companies.map(name => `<circle cx="${x}" cy="${model.y(values[name] || 0)}" r="3.5" fill="${color(name)}" stroke="var(--trend-bg, #101a21)" stroke-width="1.5"/>`).join('');
     const ordered = [...model.companies].sort((a, b) => (values[b] || 0) - (values[a] || 0) || a.localeCompare(b));
     tooltip.hidden = false;
     tooltip.innerHTML = `<div class="jf-trend-tooltip-date">${dateLabel(activeDate, true)}<small>Cumulative discoveries</small></div><div class="jf-trend-tooltip-values">${ordered.map(name => `<div><span class="jf-trend-dot" style="--series:${color(name)}"></span><span>${esc(name)}</span><b>${fmt(values[name])}</b></div>`).join('')}</div>`;

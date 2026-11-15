@@ -109,6 +109,19 @@ async function main() {
     app.evaluate('capturePreferences()');
     assert.deepEqual(JSON.parse(app.evaluate('JSON.stringify(accountState.draft.preferences.preferred_locations)')),['San Francisco, CA','Remote, US'],'Commas inside locations survive form capture');
   }
+  {
+    const app=accountContext(),data=fixture();data.applicant={first_name:'Saved',email:'saved@example.com',phone:'123'};data.uploads=[{id:'onboard',filename:'Saved resume.pdf',application_resume_id:'resume-one'}];app.context.data=data;
+    app.evaluate('accountState.draft=draftFromOnboarding(data)');
+    const payload=JSON.parse(app.evaluate('JSON.stringify(draftPayload(accountState.draft))'));
+    assert.deepEqual(payload.applicant,data.applicant,'Saved applicant details travel with onboarding');
+    assert.match(app.evaluate('profileCard()'),/type="file"[^>]* multiple/,'Onboarding accepts multiple resume versions');
+    assert.match(app.evaluate('uploadList()'),/\/api\/application-resumes\/resume-one/,'Saved uploads are reusable application files');
+    app.evaluate('accountState.uploadQueue=[{id:"first",filename:"first.txt",suggestions:["First exact claim"]},{id:"second",filename:"second.txt",suggestions:["Second exact claim"]}];nextUploadReview()');
+    assert.equal(app.evaluate('accountState.pendingUpload.id'),'first');
+    assert.equal(app.evaluate('accountState.pendingSuggestions[0].text'),'First exact claim');
+    app.evaluate('nextUploadReview()');assert.equal(app.evaluate('accountState.pendingUpload.id'),'second');
+    assert.equal(app.evaluate('accountState.draft.profile.evidence.length'),1,'Review queue never silently adds evidence');
+  }
   console.log('Account UI checks passed.');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

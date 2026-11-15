@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Jobflow Browser Worker",
+  "version": "0.1.3",
+  "minimum_chrome_version": "120",
+  "description": "Inspect and submit reviewed Jobflow application batches using your browser.",
+  "permissions": ["activeTab", "scripting", "storage", "alarms"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "popup.html", "default_title": "Jobflow Browser Worker"}
+}

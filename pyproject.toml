@@ -17,6 +17,8 @@ include = ["jobflow*"]
 
 [tool.setuptools.package-data]
 jobflow = [
+  "browser_worker/*.json", "browser_worker/*.js", "browser_worker/*.html",
+  "browser_worker/*.css", "browser_worker/*.md",
   "web_assets/*.html", "web_assets/*.css", "web_assets/*.js",
   "web_assets/fonts/*.woff2", "web_assets/fonts/*OFL.txt", "web_assets/fonts/README.md",
   "web_assets/art/*.webp", "web_assets/art/README.md",
@@ -24,4 +26,10 @@ jobflow = [
   "web_assets/vendor/leaflet/*.txt", "web_assets/vendor/leaflet/*.md",
   "web_assets/vendor/leaflet/LICENSE",
   "web_assets/vendor/leaflet/images/*.png",
+  "web_assets/vendor/maplibre/*.js", "web_assets/vendor/maplibre/*.css",
+  "web_assets/vendor/maplibre/*.txt", "web_assets/vendor/maplibre/*.md",
+  "web_assets/vendor/pdfjs/*.mjs", "web_assets/vendor/pdfjs/*.md", "web_assets/vendor/pdfjs/LICENSE",
+  "web_assets/vendor/pdfjs/cmaps/*", "web_assets/vendor/pdfjs/standard_fonts/*",
+  "web_assets/vendor/pdfjs/wasm/*",
+  "web_assets/vendor/pdf-lib/*.js", "web_assets/vendor/pdf-lib/*.md",
 ]

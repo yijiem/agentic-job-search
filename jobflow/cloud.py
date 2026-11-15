@@ -20,8 +20,9 @@ from .cloud_accounts import Accounts
 from .cloud_auth import AuthError, PendingSignIns, RateLimiter, SupabaseEmailAuth
 from .cloud_jobs import WorkQueue, worker_loop
 from .onboarding import initialize_workspace, onboarding_state, save_onboarding, upload_resume
-from .web import (ASSET_DIRECTORY, STATIC_ASSETS, MAX_REQUEST_BYTES, JobflowHandler, WebError,
-                  app_build, job_detail, perform_action, snapshot)
+from .web import (ASSET_DIRECTORY, STATIC_ASSETS, MAX_REQUEST_BYTES, MAX_UPLOAD_REQUEST_BYTES,
+                  JobflowHandler, WebError, app_build, browser_worker_archive, job_detail,
+                  perform_action, profile_summary, snapshot, validate_action_size)
 
 UPLOAD_REQUEST_LIMIT = 7 * 1024 * 1024
 
@@ -264,6 +265,40 @@ class CloudHandler(JobflowHandler):
                     'app_build': app_build(self.server.asset_directory)})
             elif path == '/api/version':
                 self._respond(200, {'app_build': app_build(self.server.asset_directory)})
+            elif path == '/api/profile':
+                self._respond(200, profile_summary(root))
+            elif path == '/api/batches':
+                from .application_batches import batch_snapshot
+                if not onboarding_state(root)['complete']:
+                    raise WebError('Complete your profile before preparing applications.', 409)
+                self._respond(200, {**batch_snapshot(root), 'csrf_token': session['csrf_token'],
+                                    'codex': {'available': False, 'reason': 'Open your local Jobflow workspace to run applications with Codex on this computer.'}})
+            elif path == '/api/resumes':
+                from .resumes import resume_library
+                self._respond(200, {**resume_library(root), 'csrf_token': session['csrf_token']})
+            elif path == '/api/resume-reviews':
+                from .resume_reviews import review_list
+                resume_id = parse_qs(urlsplit(self.path).query).get('resume_id', [None])[0]
+                self._respond(200, review_list(root, resume_id))
+            elif path.startswith('/api/resume-reviews/'):
+                from .resume_reviews import review_detail
+                self._respond(200, review_detail(root, path[len('/api/resume-reviews/'):]))
+            elif path.startswith('/api/resumes/'):
+                from .resumes import resume_detail
+                self._respond(200, resume_detail(root, path[len('/api/resumes/'):]))
+            elif path.startswith('/api/resume-drafts/'):
+                from .resumes import resume_draft_detail
+                self._respond(200, resume_draft_detail(root, path[len('/api/resume-drafts/'):]))
+            elif path.startswith('/api/batches/'):
+                from .application_batches import batch_detail
+                batch = batch_detail(root, path[len('/api/batches/'):])
+                if batch is None:
+                    raise WebError('Application batch not found.', 404)
+                self._respond(200, batch)
+            elif path.startswith('/api/application-resumes/'):
+                self._resume(root, path[len('/api/application-resumes/'):])
+            elif path == '/browser-worker.zip':
+                raise WebError('The browser worker is retired. Use Codex from your local Jobflow application batches.', 410)
             elif path.startswith('/api/jobs/'):
                 self._respond(200, job_detail(root, path[len('/api/jobs/'):]))
             elif path.startswith('/api/'):
@@ -376,7 +411,10 @@ class CloudHandler(JobflowHandler):
                 return
             if path not in ('/api/action', '/api/onboarding', '/api/resume', '/api/search'):
                 raise WebError('Unknown API route.', 404)
-            payload = self._json(UPLOAD_REQUEST_LIMIT if path == '/api/resume' else MAX_REQUEST_BYTES)
+            payload = self._json(UPLOAD_REQUEST_LIMIT if path == '/api/resume' else
+                                 MAX_UPLOAD_REQUEST_BYTES if path == '/api/action' else MAX_REQUEST_BYTES)
+            if path == '/api/action':
+                validate_action_size(payload, int(self.headers['Content-Length']))
             account = session['account']
             root = self._root(account)
             lock = self.server.account_lock(account['id'])
