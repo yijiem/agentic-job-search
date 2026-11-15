@@ -11,7 +11,9 @@ import os
 import re
 import secrets
 import threading
+import time
 import uuid
+from http.client import IncompleteRead
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -19,6 +21,14 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+READ_ONLY_RPCS = frozenset((
+    'jobflow_record_get', 'jobflow_records_page', 'jobflow_runs_recent',
+    'jobflow_workspace_stats', 'jobflow_import_verify', 'jobflow_file_get',
+    'jobflow_file_list', 'jobflow_account_lookup', 'jobflow_account_get',
+    'jobflow_account_list', 'jobflow_session_get', 'jobflow_queue_status',
+))
+TRANSIENT_HTTP_STATUS = frozenset((408, 429, 500, 502, 503, 504))
+RETRY_DELAYS = (0.25, 0.75)
 _leases = contextvars.ContextVar('jobflow_remote_leases', default={})
 
 
@@ -28,6 +38,7 @@ class RemoteError(RuntimeError):
         super().__init__(message)
         self.status = status
         self.code = code
+        self.retry_exhausted = False
 
 
 class RemoteBusyError(RemoteError):
@@ -84,7 +95,35 @@ class SupabaseClient:
         self.sent_bytes = 0
         self.received_bytes = 0
 
+    @staticmethod
+    def _retry_safe(operation):
+        """Retry only a caller-proven idempotent operation, at most twice."""
+        for attempt in range(len(RETRY_DELAYS) + 1):
+            try:
+                return operation()
+            except RemoteError as error:
+                transient = (error.status in TRANSIENT_HTTP_STATUS or
+                             (error.status is None and str(error) ==
+                              'The private service could not be reached. Please retry.'))
+                if not transient:
+                    raise
+                if attempt == len(RETRY_DELAYS):
+                    error.retry_exhausted = True
+                    raise
+                time.sleep(RETRY_DELAYS[attempt])
+
     def request(self, method, path, payload=None, headers=None, raw=False):
+        operation = lambda: self._request_once(method, path, payload, headers, raw)
+        # POST is not generally idempotent: only reviewed read-only functions
+        # qualify. Claims, counters, run starts, and one-time auth consumption
+        # must never be replayed after an uncertain response.
+        read_rpc = (method == 'POST' and isinstance(path, str) and
+                    path in {'/rest/v1/rpc/' + name for name in READ_ONLY_RPCS})
+        storage_read = (method == 'GET' and isinstance(path, str) and
+                        path.startswith('/storage/v1/object/'))
+        return self._retry_safe(operation) if read_rpc or storage_read else operation()
+
+    def _request_once(self, method, path, payload=None, headers=None, raw=False):
         if not isinstance(path, str) or not path.startswith('/') or path.startswith('//'):
             raise RemoteError('Invalid private service request path.')
         values = {'apikey': self._key, 'Authorization': 'Bearer ' + self._key,
@@ -105,14 +144,10 @@ class SupabaseClient:
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 body = response.read(MAX_RESPONSE_BYTES + 1)
+                content_encoding = response.headers.get('Content-Encoding', '').casefold()
                 self.received_bytes += len(body)
                 if len(body) > MAX_RESPONSE_BYTES:
                     raise RemoteError('The private service response exceeded its size limit.')
-                if response.headers.get('Content-Encoding', '').casefold() == 'gzip':
-                    with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
-                        body = stream.read(MAX_RESPONSE_BYTES + 1)
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        raise RemoteError('The private service response exceeded its size limit.')
         except HTTPError as error:
             code = None
             try:
@@ -124,8 +159,18 @@ class SupabaseClient:
             kind = RemoteBusyError if code == '55P03' else RemoteError
             raise kind('Private service request failed (HTTP %s%s).' %
                        (error.code, ', code ' + code if code else ''), error.code, code) from None
-        except (URLError, TimeoutError, OSError):
+        except (URLError, TimeoutError, OSError, IncompleteRead):
             raise RemoteError('The private service could not be reached. Please retry.') from None
+        # Invalid compression is a response integrity error, not a transport
+        # failure. Keep it outside the network exception/retry classification.
+        if content_encoding == 'gzip':
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
+                    body = stream.read(MAX_RESPONSE_BYTES + 1)
+            except (OSError, EOFError):
+                raise RemoteError('The private service returned invalid compressed content.') from None
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise RemoteError('The private service response exceeded its size limit.')
         if raw:
             return body
         if not body:
@@ -154,8 +199,13 @@ class SupabaseClient:
     def storage_upload(self, bucket, key, data, content_type='application/octet-stream'):
         if not isinstance(data, bytes):
             raise TypeError('Storage uploads require bytes.')
-        return self.request('POST', self._object_path(bucket, key), data,
+        path = self._object_path(bucket, key)
+        operation = lambda: self.request('POST', path, data,
                             {'Content-Type': content_type, 'x-upsert': 'true'})
+        immutable = re.fullmatch(r'[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}/[a-f0-9]{64}(?:\.gz)?', key)
+        # These objects are addressed by a workspace and content hash. Replaying
+        # the same bytes to the same immutable key cannot create a second file.
+        return self._retry_safe(operation) if immutable else operation()
 
 
 def client_from_env():

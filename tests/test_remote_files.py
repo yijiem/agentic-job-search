@@ -208,6 +208,12 @@ class RemoteFilesTests(unittest.TestCase):
                  self.assertRaises(type(error)):
                 _upload_file_retry(self.root, self.root, 'inputs/a.txt', {})
             self.assertEqual(upload.call_count, 1)
+        exhausted = RemoteError('Unavailable', 503)
+        exhausted.retry_exhausted = True
+        with patch('jobflow.remote_migration._upload_file', side_effect=exhausted) as upload, \
+             self.assertRaises(RemoteError):
+            _upload_file_retry(self.root, self.root, 'inputs/a.txt', {})
+        self.assertEqual(upload.call_count, 1)
 
     def test_failed_adoption_reuses_frozen_snapshot_after_source_edit(self):
         from jobflow.remote_migration import adopt_owner

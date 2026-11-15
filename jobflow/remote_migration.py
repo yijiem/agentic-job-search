@@ -87,6 +87,8 @@ def _upload_file_retry(snapshot, root, relative, expected):
         try:
             return _upload_file(snapshot, root, relative, expected)
         except RemoteError as error:
+            if getattr(error, 'retry_exhausted', False):
+                raise
             transient = (error.status in (408, 429, 500, 502, 503, 504) or
                          (error.status is None and str(error) ==
                           'The private service could not be reached. Please retry.'))

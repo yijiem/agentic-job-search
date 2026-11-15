@@ -86,6 +86,9 @@ class MemoryRPC:
             return {'records_mismatched': sum(self.rows.get((r['kind'], r['id'])) != r
                                              for r in params.get('p_records', [])),
                     'runs_mismatched': 0}
+        if name == 'jobflow_runs_import':
+            self.runs.extend(params['p_rows'])
+            return len(params['p_rows'])
         if name == 'jobflow_workspace_stats':
             return {'records': {'jobs': len(self.rows)}, 'runs': 0, 'revision': self.revision}
         raise AssertionError(name)
@@ -248,6 +251,52 @@ class RemoteTests(unittest.TestCase):
                     store.put('tasks', 'done', {'id': 'done', 'status': 'done'})
                     raise ValueError('validation')
         self.assertEqual('done', self.client.rows['tasks', 'done']['body']['status'])
+
+    def test_batch_bounds_utf8_payload_before_adding_next_row(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        bodies = [self.row(str(i), '\u4e2d' * length)['body']
+                  for i, length in enumerate((80, 80, 500, 80, 80))]
+        with remote.RemoteLease(self.root, client=self.client):
+            with patch('jobflow.remote_store.BATCH_BYTES', 750):
+                store.put_many('jobs', iter(bodies))
+        writes = [p['p_rows'] for n, p in self.client.calls if n == 'jobflow_records_put']
+        self.assertEqual([1, 1, 1, 1, 1], [len(rows) for rows in writes])
+        self.assertEqual(bodies, [row['body'] for rows in writes for row in rows])
+        for rows in writes:
+            size = len(json.dumps(rows, ensure_ascii=False, separators=(',', ':')).encode())
+            self.assertTrue(size <= 752 or (len(rows) == 1 and rows[0]['id'] == '2'))
+
+    def test_replacing_buffered_row_counts_only_latest_payload(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        with remote.RemoteLease(self.root, client=self.client):
+            with patch('jobflow.remote_store.BATCH_BYTES', 750):
+                with store.batch():
+                    for score in range(6):
+                        store.put('jobs', 'a', {'id': 'a', 'description': '\u4e2d' * 80, 'score': score})
+                    store.put('jobs', 'b', {'id': 'b'})
+        writes = [p['p_rows'] for n, p in self.client.calls if n == 'jobflow_records_put']
+        self.assertEqual([2], [len(rows) for rows in writes])
+        self.assertEqual(5, self.client.rows['jobs', 'a']['body']['score'])
+
+    def test_import_and_verification_share_count_and_byte_bounds(self):
+        store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)
+        records = [self.row(str(i), '\u4e2d' * 80) for i in range(5)]
+        runs = [{'id': i, 'details': '\u4e2d' * 100} for i in range(5)]
+        with patch('jobflow.remote_store.BATCH_SIZE', 2):
+            with patch('jobflow.remote_store.BATCH_BYTES', 750):
+                with remote.RemoteLease(self.root, client=self.client):
+                    store.import_records(iter(records))
+                    store.import_runs(iter(runs))
+                checked = store.verify_import(iter(records), iter(runs))
+        self.assertEqual({'records_mismatched': 0, 'runs_mismatched': 0}, checked)
+        self.assertEqual(runs, self.client.runs)
+        for name, params in self.client.calls:
+            if name not in ('jobflow_records_put', 'jobflow_runs_import', 'jobflow_import_verify'):
+                continue
+            rows = params.get('p_rows', params.get('p_records', params.get('p_runs')))
+            self.assertLessEqual(len(rows), 2)
+            self.assertLessEqual(len(json.dumps(rows, ensure_ascii=False,
+                                              separators=(',', ':')).encode()), 752)
 
     def test_batch_does_not_flush_after_lease_loss(self):
         store = RemoteStore(self.root / 'data/jobflow.sqlite3', self.client)

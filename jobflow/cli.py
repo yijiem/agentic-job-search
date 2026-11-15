@@ -220,7 +220,14 @@ def dispatch(args, store, config, profile):
         from .matching import match_job
         jobs = store.all('jobs')
         job_count = len(jobs)
-        store.put_many('jobs', [{**job, **match_job(job, profile, config)} for job in jobs])
+        def changed_matches():
+            for job in jobs:
+                matching = match_job(job, profile, config)
+                if any(job.get(key) != value for key, value in matching.items()):
+                    yield {**job, **matching}
+        # Stream changed rows so a rematch does not duplicate or rewrite the
+        # entire saved corpus when its matching results are already current.
+        store.put_many('jobs', changed_matches())
         del jobs
         # Preserve previous drafts, but make their older profile basis explicit.
         store.put_many('packets', [{**packet, 'needs_profile_review': True}

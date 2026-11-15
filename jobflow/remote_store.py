@@ -8,13 +8,36 @@ from pathlib import Path
 from .remote import RemoteError, client_from_env, token_for, workspace_id
 
 
-PAGE_SIZE = 500
-BATCH_SIZE = 150
-BATCH_BYTES = 2 * 1024 * 1024
+PAGE_SIZE = 200
+# Keep each write below the hosted database's short statement timeout. Byte
+# limits include row metadata and UTF-8 expansion; one larger row travels alone.
+BATCH_SIZE = 50
+BATCH_BYTES = 256 * 1024
 
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _row_size(row):
+    return len(json.dumps(row, ensure_ascii=False, separators=(',', ':'),
+                          allow_nan=False).encode('utf-8')) + 1
+
+
+def _row_batches(rows, parse_body=False):
+    batch, size = [], 0
+    for row in rows:
+        row = dict(row)
+        if parse_body and isinstance(row['body'], str):
+            row['body'] = json.loads(row['body'])
+        encoded_size = _row_size(row)
+        if batch and (len(batch) >= BATCH_SIZE or size + encoded_size > BATCH_BYTES):
+            yield batch
+            batch, size = [], 0
+        batch.append(row)
+        size += encoded_size
+    if batch:
+        yield batch
 
 
 class RemoteStore:
@@ -25,6 +48,7 @@ class RemoteStore:
         self._cache = {}
         self._complete = set()
         self._pending = {}
+        self._pending_sizes = {}
         self._pending_bytes = 0
         self._batch_depth = 0
 
@@ -84,9 +108,16 @@ class RemoteStore:
         if self._batch_depth:
             # Check the lease before accepting an update into a local buffer.
             token_for(self.root)
+            pending_key = (kind, str(key))
+            encoded_size = _row_size(row)
+            replacement_size = self._pending_sizes.get(pending_key, 0)
+            if self._pending and self._pending_bytes - replacement_size + encoded_size > BATCH_BYTES:
+                self.flush()
+                replacement_size = 0
             self._cache.setdefault(kind, {})[str(key)] = value
-            self._pending[(kind, str(key))] = row
-            self._pending_bytes += len(json.dumps(value, ensure_ascii=False).encode('utf-8'))
+            self._pending[pending_key] = row
+            self._pending_sizes[pending_key] = encoded_size
+            self._pending_bytes += encoded_size - replacement_size
             if len(self._pending) >= BATCH_SIZE or self._pending_bytes >= BATCH_BYTES:
                 self.flush()
         else:
@@ -119,6 +150,7 @@ class RemoteStore:
         rows = list(self._pending.values())
         self._write('jobflow_records_put', p_rows=rows, p_import=False)
         self._pending.clear()
+        self._pending_sizes.clear()
         self._pending_bytes = 0
 
     @contextmanager
@@ -142,27 +174,15 @@ class RemoteStore:
     def import_records(self, rows):
         """Import exact record timestamps; each bounded request is idempotent."""
         self.flush()
-        batch, size = [], 0
-        for row in rows:
-            value = dict(row)
-            if isinstance(value['body'], str):
-                value['body'] = json.loads(value['body'])
-            encoded_size = len(json.dumps(value, ensure_ascii=False).encode('utf-8'))
-            if batch and (len(batch) >= BATCH_SIZE or size + encoded_size > BATCH_BYTES):
-                self._write('jobflow_records_put', p_rows=batch, p_import=True)
-                batch, size = [], 0
-            batch.append(value)
-            size += encoded_size
-        if batch:
+        for batch in _row_batches(rows, parse_body=True):
             self._write('jobflow_records_put', p_rows=batch, p_import=True)
         self._cache.clear()
         self._complete.clear()
 
     def import_runs(self, rows):
         self.flush()
-        rows = [dict(row) for row in rows]
-        for start in range(0, len(rows), BATCH_SIZE):
-            self._write('jobflow_runs_import', p_rows=rows[start:start + BATCH_SIZE])
+        for batch in _row_batches(rows):
+            self._write('jobflow_runs_import', p_rows=batch)
 
     def stats(self):
         self.flush()
@@ -172,20 +192,7 @@ class RemoteStore:
         """Compare original data in Postgres without downloading it a second time."""
         result = {'records_mismatched': 0, 'runs_mismatched': 0}
         for name, values in (('p_records', records), ('p_runs', runs)):
-            batch, size = [], 0
-            for row in values:
-                row = dict(row)
-                if name == 'p_records' and isinstance(row['body'], str):
-                    row['body'] = json.loads(row['body'])
-                encoded_size = len(json.dumps(row, ensure_ascii=False).encode('utf-8'))
-                if batch and (len(batch) >= BATCH_SIZE or size + encoded_size > BATCH_BYTES):
-                    checked = self.client.rpc('jobflow_import_verify', self._params(**{name: batch}))
-                    for key in result:
-                        result[key] += checked[key]
-                    batch, size = [], 0
-                batch.append(row)
-                size += encoded_size
-            if batch:
+            for batch in _row_batches(values, parse_body=name == 'p_records'):
                 checked = self.client.rpc('jobflow_import_verify', self._params(**{name: batch}))
                 for key in result:
                     result[key] += checked[key]
