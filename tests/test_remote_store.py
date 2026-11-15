@@ -77,7 +77,7 @@ class MemoryRPC:
             rows = [r for r in rows if (not params['p_kind'] or r['kind'] == params['p_kind'])
                     and (r['kind'], r['created_at'], r['id']) >
                     (params['p_after_kind'], params['p_after_created'], params['p_after_id'])]
-            if params['p_mode'] == 'projected':
+            if params['p_mode'] in ('projected', 'matching'):
                 rows = [{**r, 'body': {k: v for k, v in r['body'].items() if k != 'description'}} for r in rows]
             return {'records': rows[:params['p_limit']], 'revision': self.revision,
                     'count': sum(r['kind'] == 'jobs' for r in self.rows.values()),
@@ -337,10 +337,45 @@ class RemoteTests(unittest.TestCase):
         self.client.rows = {('jobs', str(i)): self.row(str(i)) for i in range(3)}
         self.client.conflict_after_first_page = True
         with patch('jobflow.remote_store.client_from_env', return_value=self.client):
-            with patch('jobflow.remote_store.PAGE_SIZE', 2):
+            with patch('jobflow.remote_store.UI_PAGE_SIZE', 2):
                 with self.assertRaises(remote.RemoteError) as result:
                     read_records(self.root)
         self.assertEqual(409, result.exception.status)
+
+    def test_ui_read_uses_bounded_500_row_pages_and_preserves_revision(self):
+        self.client.rows = {('jobs', str(i)): self.row(str(i)) for i in range(1000)}
+        self.client.revision = 17
+        self.client.runs = [{'id': 3, 'details': '{"source_errors":[]}'}]
+        with patch('jobflow.remote_store.client_from_env', return_value=self.client):
+            records, runs, count = read_records(self.root)
+        pages = [args for name, args in self.client.calls if name == 'jobflow_records_page']
+        self.assertEqual(len(pages), 3)  # Includes the empty terminal page.
+        self.assertTrue(all(args['p_limit'] == 500 for args in pages))
+        self.assertEqual([args['p_revision'] for args in pages], [None, 17, 17])
+        self.assertEqual({row['id'] for row in records['jobs']}, {str(i) for i in range(1000)})
+        self.assertTrue(all('description' not in row for row in records['jobs']))
+        self.assertTrue(all('description' in row['body'] for row in self.client.rows.values()))
+        self.assertEqual(count, 1000)
+        self.assertEqual(runs[0]['details'], {'source_errors': []})
+
+    def test_ui_read_reduces_oversized_pages_without_advancing_cursor(self):
+        self.client.rows = {('jobs', str(i)): self.row(str(i)) for i in range(501)}
+        rpc = self.client.rpc
+        attempts = []
+
+        def bounded_rpc(name, args):
+            attempts.append(args)
+            if args['p_limit'] > 200:
+                raise remote.RemoteResponseTooLarge('The private service response exceeded its size limit.')
+            return rpc(name, args)
+
+        with patch.object(self.client, 'rpc', side_effect=bounded_rpc), \
+                patch('jobflow.remote_store.client_from_env', return_value=self.client):
+            records, unused, count = read_records(self.root)
+        self.assertEqual([args['p_limit'] for args in attempts], [500, 200, 200, 200])
+        self.assertEqual(attempts[0]['p_after_id'], attempts[1]['p_after_id'])
+        self.assertEqual(len({row['id'] for row in records['jobs']}), 501)
+        self.assertEqual(count, 501)
 
 
 if __name__ == '__main__':

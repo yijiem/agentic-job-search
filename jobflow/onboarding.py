@@ -239,6 +239,23 @@ def _uploads(root):
     return sorted(result, key=lambda item: item.get('uploaded_at', ''), reverse=True)
 
 
+def _profile_complete(root, profile):
+    if not isinstance(profile, dict) or not profile.get('evidence'):
+        return False
+    try:
+        load_config(root)
+        return all(isinstance(row, dict) and isinstance(row.get('text'), str)
+                   and row['text'].strip() for row in profile['evidence'])
+    except (ValueError, KeyError, TypeError, OSError):
+        return False
+
+
+def onboarding_complete(root):
+    """Validate entry requirements without loading resumes or account details."""
+    root = _root_path(root)
+    return bool(_profile_complete(root, _read_json(root / 'config/profile.json', {})))
+
+
 def onboarding_state(root):
     """Read onboarding state without changing configuration or workflow history."""
     root = _root_path(root)
@@ -246,14 +263,7 @@ def onboarding_state(root):
     settings = _read_json(root / 'config/settings.json', {})
     if not isinstance(profile, dict) or not isinstance(settings, dict):
         raise ValueError('Workspace configuration must contain JSON objects.')
-    complete = False
-    if profile.get('evidence'):
-        try:
-            load_config(root)
-            complete = all(isinstance(row, dict) and isinstance(row.get('text'), str)
-                           and row['text'].strip() for row in profile['evidence'])
-        except (ValueError, KeyError, TypeError, OSError):
-            pass
+    complete = _profile_complete(root, profile)
     metadata = _read_json(root / 'config/onboarding.json', {})
     from .resumes import resume_library
     library = resume_library(root)

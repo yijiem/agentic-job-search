@@ -3,7 +3,6 @@ import base64
 import binascii
 import hashlib
 import json
-import mimetypes
 import os
 import re
 import secrets
@@ -20,10 +19,11 @@ from .cloud_accounts import Accounts
 from .cloud_auth import (AuthError, AuthRateLimitError, EmailSendCooldown,
                          PendingSignIns, RateLimiter, SupabaseEmailAuth)
 from .cloud_jobs import WorkQueue, worker_loop
-from .onboarding import initialize_workspace, onboarding_state, save_onboarding, upload_resume
+from .onboarding import (initialize_workspace, onboarding_complete, onboarding_state,
+                         save_onboarding, upload_resume)
 from .remote import enabled as remote_enabled, RemoteError, RemoteBusyError
 from .remote_interactive import execution_context
-from .remote_files import hydrate_workspace
+from .remote_files import file_read_cache, hydrate_workspace
 from .web import (ASSET_DIRECTORY, STATIC_ASSETS, MAX_REQUEST_BYTES, MAX_UPLOAD_REQUEST_BYTES,
                   JobflowHandler, WebError, app_build, browser_worker_archive, job_detail,
                   perform_action, profile_summary, snapshot, validate_action_size)
@@ -239,18 +239,17 @@ class CloudHandler(JobflowHandler):
         self._respond(303, b'', 'text/plain')
 
     def _asset(self, name):
-        if name not in STATIC_ASSETS and name not in ('account.html', 'account.js', 'account.css'):
-            raise WebError('File not found.', 404)
-        path = self.server.asset_directory / name
-        if not path.is_file() or not path.resolve().is_relative_to(self.server.asset_directory):
-            raise WebError('File not found.', 404)
-        body = path.read_bytes()
-        if name.endswith('.html'):
-            body = body.replace(b'__JOBFLOW_BUILD__', app_build(self.server.asset_directory).encode('ascii'))
-        mime = mimetypes.guess_type(name)[0] or 'application/octet-stream'
-        self._respond(200, body, mime + ('; charset=utf-8' if mime.startswith('text/') or mime in ('application/javascript', 'application/json') else ''))
+        return super()._asset(name, extra_assets=('account.html', 'account.js', 'account.css'))
 
     def do_GET(self):
+        # The email callback is a GET that can initialize and publish a new
+        # workspace. It must observe its own writes without a read-only cache.
+        if unquote(urlsplit(self.path).path) == '/auth/callback':
+            return self._get()
+        with file_read_cache():
+            self._get()
+
+    def _get(self):
         try:
             path = unquote(urlsplit(self.path).path)
             # This endpoint intentionally exposes only process readiness, never
@@ -274,6 +273,14 @@ class CloudHandler(JobflowHandler):
                         '/theme.js', '/fonts/nunito-latin.woff2', '/fonts/dm-serif-display-latin.woff2'):
                 self._asset('account.html' if path == '/account' else path.lstrip('/'))
                 return
+            # These source-controlled assets contain no account data. Serving
+            # them does not need session RPCs or the account's workspace lock.
+            if path.lstrip('/') in STATIC_ASSETS and not path.endswith('.html'):
+                self._asset(path.lstrip('/'))
+                return
+            if path == '/api/version':
+                self._respond(200, {'app_build': app_build(self.server.asset_directory)})
+                return
             session, unused = self._session(required=False)
             if path == '/api/account':
                 self._respond(200, self._account_state(session))
@@ -287,14 +294,11 @@ class CloudHandler(JobflowHandler):
             if path == '/api/background':
                 self._respond(200, {'background_job': self.server.queue.status(account['id'])})
                 return
-            if path == '/api/version':
-                self._respond(200, {'app_build': app_build(self.server.asset_directory)})
-                return
-            root = self._root(account, hydrate=path.startswith('/api/'))
+            root = self._root(account, hydrate=path.startswith('/api/') or path in ('/', '/index.html'))
             if path == '/api/onboarding':
                 self._respond(200, onboarding_state(root))
             elif path == '/api/state':
-                if not onboarding_state(root)['complete']:
+                if not onboarding_complete(root):
                     raise WebError('Complete your profile to open your workspace.', 409)
                 self._respond(200, {**snapshot(root), 'csrf_token': session['csrf_token'],
                     'account': {'email': account['email'], 'hosted': True},
@@ -304,7 +308,7 @@ class CloudHandler(JobflowHandler):
                 self._respond(200, profile_summary(root))
             elif path == '/api/batches':
                 from .application_batches import batch_snapshot
-                if not onboarding_state(root)['complete']:
+                if not onboarding_complete(root):
                     raise WebError('Complete your profile before preparing applications.', 409)
                 self._respond(200, {**batch_snapshot(root), 'csrf_token': session['csrf_token'],
                                     'codex': {'available': False, 'reason': 'Open your local Jobflow workspace to run applications with Codex on this computer.'}})
@@ -338,7 +342,7 @@ class CloudHandler(JobflowHandler):
                 self._respond(200, job_detail(root, path[len('/api/jobs/'):]))
             elif path.startswith('/api/'):
                 raise WebError('Unknown API route.', 404)
-            elif path in ('/', '/index.html') and not onboarding_state(root)['complete']:
+            elif path in ('/', '/index.html') and not onboarding_complete(root):
                 self._redirect('/account')
             else:
                 self._asset('index.html' if path == '/' else path.lstrip('/'))

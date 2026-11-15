@@ -5,10 +5,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .remote import RemoteError, client_from_env, token_for, workspace_id
+from .remote import RemoteError, RemoteResponseTooLarge, client_from_env, token_for, workspace_id
 
 
 PAGE_SIZE = 200
+# Interactive projections omit job descriptions; use the existing RPC's cap to
+# reduce serial round trips while leaving worker/bulk page sizes unchanged.
+UI_PAGE_SIZE = 500
 # Keep each write below the hosted database's short statement timeout. Byte
 # limits include row metadata and UTF-8 expansion; one larger row travels alone.
 BATCH_SIZE = 50
@@ -222,10 +225,20 @@ def read_records(root, job_mode='matching', minimum=40, job_id=None):
     records = defaultdict(list)
     cursor = {'p_after_kind': '', 'p_after_created': '', 'p_after_id': ''}
     revision, count, runs = None, 0, []
+    page_size = UI_PAGE_SIZE
     while True:
-        page = store.client.rpc('jobflow_records_page', store._params(
-            p_kind=None, p_mode=job_mode, p_minimum=minimum, p_job=job_id,
-            p_limit=PAGE_SIZE, p_revision=revision, **cursor))
+        try:
+            page = store.client.rpc('jobflow_records_page', store._params(
+                p_kind=None, p_mode=job_mode, p_minimum=minimum, p_job=job_id,
+                p_limit=page_size, p_revision=revision, **cursor))
+        except RemoteResponseTooLarge:
+            # Non-job records (e.g. resume drafts) can still be large. Retry the
+            # same cursor at a smaller limit without relaxing the byte bound or
+            # the revision check, retaining support for these workspaces.
+            if page_size == 1:
+                raise
+            page_size = min(PAGE_SIZE, page_size // 2)
+            continue
         if page.get('conflict'):
             raise RemoteError('The workspace changed while it was being read. Please refresh.', 409)
         revision, count = page['revision'], page['count']
@@ -234,7 +247,7 @@ def read_records(root, job_mode='matching', minimum=40, job_id=None):
         rows = page['records']
         for row in rows:
             records[row['kind']].append(row['body'])
-        if len(rows) < PAGE_SIZE:
+        if len(rows) < page_size:
             break
         last = rows[-1]
         cursor = {'p_after_kind': last['kind'], 'p_after_created': last['created_at'],

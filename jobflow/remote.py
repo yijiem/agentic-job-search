@@ -41,6 +41,10 @@ class RemoteError(RuntimeError):
         self.retry_exhausted = False
 
 
+class RemoteResponseTooLarge(RemoteError):
+    """A read exceeded the bounded encoded or decoded response size."""
+
+
 class RemoteBusyError(RemoteError):
     pass
 
@@ -147,7 +151,7 @@ class SupabaseClient:
                 content_encoding = response.headers.get('Content-Encoding', '').casefold()
                 self.received_bytes += len(body)
                 if len(body) > MAX_RESPONSE_BYTES:
-                    raise RemoteError('The private service response exceeded its size limit.')
+                    raise RemoteResponseTooLarge('The private service response exceeded its size limit.')
         except HTTPError as error:
             code = None
             try:
@@ -170,7 +174,7 @@ class SupabaseClient:
             except (OSError, EOFError):
                 raise RemoteError('The private service returned invalid compressed content.') from None
             if len(body) > MAX_RESPONSE_BYTES:
-                raise RemoteError('The private service response exceeded its size limit.')
+                raise RemoteResponseTooLarge('The private service response exceeded its size limit.')
         if raw:
             return body
         if not body:

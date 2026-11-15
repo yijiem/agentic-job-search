@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from jobflow.storage import Store
 from jobflow.web import (JobflowServer, WebError, _run_cli, job_detail,
-                         perform_action, profile_summary, snapshot)
+                         app_build, perform_action, profile_summary, snapshot)
 
 
 class WebTests(unittest.TestCase):
@@ -441,6 +441,54 @@ class HttpBoundaryTests(unittest.TestCase):
             status, body, headers = self.request('GET', '/api/state', headers={'Accept-Encoding': 'gzip;q=0'})
             self.assertNotIn('Content-Encoding', dict(headers))
             self.assertEqual(len(json.loads(body)['jobs']), 200)
+
+    def test_public_assets_compress_revalidate_and_pick_up_edits(self):
+        asset = self.assets / 'app.js'
+        original = b'/* public application code */\n' * 200
+        asset.write_bytes(original)
+        status, body, headers = self.request('GET', '/app.js?v=old-build',
+                                             headers={'Accept-Encoding': 'gzip'})
+        self.assertEqual(status, 200)
+        headers = dict(headers)
+        self.assertEqual(gzip.decompress(body), original)
+        self.assertLess(len(body), len(original) / 4)
+        self.assertEqual(headers['Cache-Control'], 'public, max-age=0, must-revalidate')
+        self.assertEqual(headers['Vary'], 'Accept-Encoding')
+        etag = headers['ETag']
+        status, body, headers = self.request('GET', '/app.js?v=old-build',
+                                             headers={'If-None-Match': etag})
+        self.assertEqual((status, body), (304, b''))
+        self.assertEqual(dict(headers)['ETag'], etag)
+        self.assertNotIn('Content-Length', dict(headers))
+        asset.write_bytes(original + b'/* changed */')
+        status, body, headers = self.request('GET', '/app.js?v=old-build',
+                                             headers={'If-None-Match': etag, 'Accept-Encoding': 'gzip;q=0'})
+        self.assertEqual(status, 200)
+        self.assertEqual(body, asset.read_bytes())
+        self.assertNotEqual(dict(headers)['ETag'], etag)
+        self.assertNotIn('Content-Encoding', dict(headers))
+
+    def test_html_and_private_data_ignore_cache_validators(self):
+        for path in ('/', '/api/state', '/api/profile'):
+            with self.subTest(path=path):
+                status, body, headers = self.request('GET', path, headers={'If-None-Match': '*'})
+                self.assertEqual(status, 200)
+                self.assertTrue(body)
+                self.assertEqual(dict(headers)['Cache-Control'], 'no-store')
+                self.assertNotIn('ETag', dict(headers))
+
+    def test_unchanged_build_does_not_reread_asset_contents(self):
+        first = app_build(self.assets)
+        with patch.object(Path, 'read_bytes', side_effect=AssertionError('unchanged asset reread')):
+            self.assertEqual(app_build(self.assets), first)
+        asset = self.assets / 'app.js'
+        asset.write_bytes(b'first')
+        second = app_build(self.assets)
+        self.assertNotEqual(second, first)
+        asset.write_bytes(b'other')
+        self.assertNotEqual(app_build(self.assets), second, 'Same-size edits must invalidate the build')
+        asset.unlink()
+        self.assertEqual(app_build(self.assets), first)
 
 
 if __name__ == '__main__':

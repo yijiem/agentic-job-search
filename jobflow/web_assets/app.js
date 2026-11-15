@@ -60,7 +60,26 @@ const dueApps = () => applications().filter(a=>a.follow_up_date && a.follow_up_d
 const pendingTasks = () => (state.data?.tasks || []).filter(t=>['todo','doing'].includes(t.status));
 function toast(message,error=false) { const node=$('#toast');node.textContent=message;node.className='toast visible'+(error?' error':'');clearTimeout(state.toastTimer);state.toastTimer=setTimeout(()=>node.classList.remove('visible'),5000); }
 function setData(data) { state.agentProposal=null; resetPrepGuide(); state.data=data; state.jobMap=new Map((data.jobs||[]).map(j=>[j.id,j]));state.appMap=new Map((data.applications||[]).map(a=>[a.job_id||a.id,a])); if(!state.inboxDate)state.inboxDate=data.today; noticeAppBuild(data.app_build); updateHostedChrome(); }
-async function refresh(showNotice=false) { try { const response=await fetch('/api/state',{cache:'no-store'});if(response.status===401||response.status===409){location.assign('/account');return;}if(!response.ok)throw new Error('Unable to read your workspace.');setData(await response.json());render();if(showNotice)toast('Workspace refreshed.'); }catch(error){if(!state.data)$('#main').innerHTML=pageHeader('Your workspace','Workspace unavailable','The local workspace is not responding.')+empty('Could not load your data',error.message)+button('Try again','data-action="refresh"','primary');else toast(error.message,true);} }
+async function refresh(showNotice=false) {
+  // The async bootstrap can arrive before or after app.js. Claim its response
+  // once and prevent a late bootstrap from starting a duplicate workspace read.
+  window.JobflowStateStarted = true;
+  const initial = window.JobflowInitialState;
+  delete window.JobflowInitialState;
+  try {
+    const pending = initial ? await initial : null;
+    if (pending?.error) throw pending.error;
+    const response = pending?.response || await fetch('/api/state', {cache:'no-store'});
+    if (response.status === 401 || response.status === 409) {location.assign('/account');return;}
+    if (!response.ok) throw new Error('Unable to read your workspace.');
+    setData(await response.json());
+    render();
+    if (showNotice) toast('Workspace refreshed.');
+  } catch (error) {
+    if (!state.data) $('#main').innerHTML = pageHeader('Your workspace','Workspace unavailable','The local workspace is not responding.') + empty('Could not load your data',error.message) + button('Try again','data-action="refresh"','primary');
+    else toast(error.message,true);
+  }
+}
 async function mutate(payload, message='Workspace updated.') { if(state.busy)return false;state.busy=true;document.querySelectorAll('.action-dialog button[type="submit"]').forEach(b=>b.disabled=true);try { const batches=payload.action==='application'&&payload.job_ids?.length>100?Array.from({length:Math.ceil(payload.job_ids.length/100)},(_,i)=>({...payload,job_ids:payload.job_ids.slice(i*100,(i+1)*100)})):[payload];let completed=0,skipped=0;for(const batch of batches){const response=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.data.csrf_token},body:JSON.stringify(batch)});const result=await response.json();if(!response.ok||result.error)throw new Error((completed?`${completed} records updated before the error. `:'')+(result.error||result.message||'The update could not be saved.'));completed+=Number(result.updated||0);skipped+=Number(result.skipped||0);}await refresh();toast(message+(skipped?` ${skipped} existing application stage${skipped===1?' was':'s were'} preserved.`:''));return true;}catch(error){toast(error.message,true);const el=$('#form-error');if(el)el.textContent=error.message;return false;}finally{state.busy=false;document.querySelectorAll('.action-dialog button[type="submit"]').forEach(b=>b.disabled=false);} }
 function updateHostedChrome() {
   const hosted = Boolean(state.data?.account?.hosted);

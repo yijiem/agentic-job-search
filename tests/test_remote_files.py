@@ -10,6 +10,7 @@ import sqlite3
 import time
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, Mock
 
 from jobflow import remote_files
@@ -145,6 +146,96 @@ class RemoteFilesTests(unittest.TestCase):
         self.assertTrue((self.root / metadata_name).exists())
         self.assertFalse((self.root / 'inputs/resumes/original.pdf').exists())
         self.assertEqual(self.backend.events.count('download'), 2)
+
+    def test_read_scope_reuses_manifest_and_revalidates_on_next_request(self):
+        path = self.write('config/profile.json', b'{"name":"original"}')
+        remote_files.persist_file(self.root, path)
+        with patch.object(self.backend, 'rpc', wraps=self.backend.rpc) as requests:
+            with remote_files.file_read_cache():
+                remote_files.hydrate_workspace(self.root)
+                remote_files.hydrate_workspace(self.root)
+                remote_files.ensure_file(self.root, 'config/profile.json')
+                remote_files.ensure_file(self.root, 'config/onboarding.json')
+            self.assertEqual([call.args[0] for call in requests.call_args_list],
+                             ['jobflow_file_list', 'jobflow_file_list'])
+        # A separate worker can publish a newer version between HTTP requests.
+        path.write_bytes(b'{"name":"updated"}')
+        remote_files.persist_file(self.root, path)
+        path.write_bytes(b'{"name":"stale"}')
+        with remote_files.file_read_cache():
+            remote_files.hydrate_workspace(self.root)
+            self.assertEqual(path.read_bytes(), b'{"name":"updated"}')
+
+    def test_read_scope_keeps_workspaces_separate_and_discards_errors(self):
+        path = self.write('config/profile.json', b'{"name":"first"}')
+        remote_files.persist_file(self.root, path)
+        other = Path(self.temp.name) / 'other'
+        (other / 'config').mkdir(parents=True)
+        (other / 'config/remote.json').write_text(json.dumps({'workspace_id': str(uuid.uuid4())}))
+        other_path = other / 'config/profile.json'
+        other_path.write_bytes(b'{"name":"second"}')
+        remote_files.persist_file(other, other_path)
+        with self.assertRaisesRegex(RuntimeError, 'request failed'):
+            with remote_files.file_read_cache():
+                self.assertEqual(remote_files.ensure_file(self.root, 'config/profile.json').read_bytes(),
+                                 b'{"name":"first"}')
+                self.assertEqual(remote_files.ensure_file(other, 'config/profile.json').read_bytes(),
+                                 b'{"name":"second"}')
+                raise RuntimeError('request failed')
+        self.backend.rows.pop((self.workspace, 'config/profile.json'))
+        remote_files.ensure_file(self.root, 'config/profile.json')
+        self.assertFalse(path.exists(), 'metadata survived the failed request')
+
+    def test_config_manifest_absence_still_removes_unpublished_local_file(self):
+        path = self.write('config/profile.json', b'not committed')
+        with remote_files.file_read_cache():
+            remote_files.hydrate_workspace(self.root)
+        self.assertFalse(path.exists())
+
+    def test_first_signin_callback_reads_its_newly_published_configuration(self):
+        from jobflow.cloud import CloudHandler
+        import threading
+
+        account = {'id': 'fixture', 'email': 'fixture@example.test', 'status': 'invited'}
+        server = SimpleNamespace(
+            origin='http://127.0.0.1', cookie_name='session', pending_cookie_name='pending',
+            secure_cookie=False, sources=[], account_lock=lambda unused: threading.RLock(),
+            pending_signins=SimpleNamespace(
+                consume=lambda unused: {'email': account['email'], 'verifier': 'verifier'},
+                revoke=lambda unused: None),
+            auth=SimpleNamespace(exchange_link=lambda *args: {'id': 'identity', 'email': account['email']}),
+            accounts=SimpleNamespace(lookup_email=lambda unused: account,
+                authenticate_identity=lambda *args: account, workspace=lambda unused: self.root,
+                create_session=lambda unused: ('session-token', 'csrf-token')))
+        handler = object.__new__(CloudHandler)
+        handler.server = server
+        handler.path = '/auth/callback?code=valid-code'
+        handler.command = 'GET'
+        handler.headers = {'Host': '127.0.0.1', 'Cookie': 'pending=browser-token'}
+        handler._held_account_locks = {}
+        responses = []
+        handler._respond = lambda status, *args: responses.append(status)
+        rpc = self.backend.rpc
+
+        def records_or_files(name, args):
+            if name == 'jobflow_records_page':
+                return {'records': [], 'revision': 0}
+            return rpc(name, args)
+
+        try:
+            with patch('jobflow.cloud.execution_context', return_value=nullcontext()), \
+                    patch('jobflow.remote.RemoteLease', return_value=nullcontext()), \
+                    patch('jobflow.remote_store.client_from_env', return_value=self.backend), \
+                    patch.object(self.backend, 'rpc', side_effect=records_or_files):
+                handler.do_GET()
+        finally:
+            for lock in handler._held_account_locks.values():
+                lock.release()
+        self.assertEqual(responses, [200])
+        for name in ('config/settings.json', 'config/profile.json', 'config/hosted.json'):
+            with self.subTest(file=name):
+                self.assertTrue((self.root / name).is_file())
+                self.assertIn((self.workspace, name), self.backend.rows)
 
     def test_local_workspaces_remain_local(self):
         with patch.dict(os.environ, {'JOBFLOW_BACKEND': ''}):

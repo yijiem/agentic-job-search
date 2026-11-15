@@ -20,6 +20,7 @@ import webbrowser
 import zipfile
 from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -36,7 +37,7 @@ from .locations import location_catalog, location_reviews, office_locations
 ASSET_DIRECTORY = Path(__file__).with_name('web_assets')
 # Deliberately enumerate public files instead of exposing the asset directory.
 STATIC_ASSETS = frozenset((
-    'index.html', 'app.js', 'styles.css', 'explore.css', 'company-logos.js', 'theme.js', 'my-account.js', 'my-account.css',
+    'index.html', 'bootstrap.js', 'app.js', 'styles.css', 'explore.css', 'company-logos.js', 'theme.js', 'my-account.js', 'my-account.css',
     'trends.js', 'trends.css', 'maps.js', 'maps.css', 'batches.js', 'batches.css',
     'resumes.js', 'resumes.css', 'pdf-review.js', 'pdf-review.css',
     'resume-controls.js', 'resume-controls.css',
@@ -61,8 +62,24 @@ JOB_FIELDS = ('id', 'company', 'title', 'location', 'url', 'source_id', 'score',
 
 def app_build(asset_directory=ASSET_DIRECTORY):
     """Fingerprint the served UI so an already-open tab can offer a reload."""
-    digest = hashlib.sha256()
+    directory = Path(asset_directory).resolve()
+    # Check for edits, additions and removals without rereading every vendor
+    # library, font and logo on every HTML/state/version request.
+    signature = []
     for name in sorted(STATIC_ASSETS):
+        path = directory / name
+        try:
+            info = path.stat()
+            signature.append((name, info.st_mtime_ns, info.st_ctime_ns, info.st_size))
+        except FileNotFoundError:
+            signature.append((name, None, None, None))
+    return _app_build(str(directory), tuple(signature))
+
+
+@lru_cache(maxsize=8)
+def _app_build(asset_directory, signature):
+    digest = hashlib.sha256()
+    for name, unused_mtime, unused_ctime, unused_size in signature:
         path = Path(asset_directory) / name
         digest.update(name.encode('utf-8'))
         digest.update(path.read_bytes() if path.is_file() else b'')
@@ -508,24 +525,54 @@ class JobflowHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     quality = 0
                 gzip_accepted = quality > 0
-        compressed = gzip_accepted and content_type.startswith('application/json') and len(body) > 1024
+        compressible = content_type.startswith('text/') or content_type.split(';')[0] in (
+            'application/json', 'application/javascript', 'application/wasm', 'image/svg+xml')
+        compressed = gzip_accepted and compressible and len(body) > 1024
         if compressed:
             body = gzip.compress(body, compresslevel=5)
         self.send_response(status)
         self.send_header('Content-Type', content_type)
-        self.send_header('Content-Length', str(len(body)))
+        if status != 304:
+            self.send_header('Content-Length', str(len(body)))
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.send_header('Vary', 'Accept-Encoding')
         if compressed:
             self.send_header('Content-Encoding', 'gzip')
-        self.send_header('Cache-Control', 'no-store')
+        if not any(key.casefold() == 'cache-control' for key in (extra_headers or {})):
+            self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'strict-origin-when-cross-origin')
         self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org https://tiles.openfreemap.org; font-src 'self' blob:; connect-src 'self' https://tiles.openfreemap.org; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         self.end_headers()
         self.wfile.write(body)
+
+    def _asset(self, name, extra_assets=()):
+        """Serve only public presentation assets; private responses never cache."""
+        if name not in STATIC_ASSETS and name not in extra_assets:
+            raise WebError('File not found.', 404)
+        target = (self.server.asset_directory / name).resolve()
+        if not target.is_relative_to(self.server.asset_directory) or not target.is_file():
+            raise WebError('File not found.', 404)
+        body = target.read_bytes()
+        mime = mimetypes.guess_type(str(target))[0] or 'application/octet-stream'
+        content_type = mime + ('; charset=utf-8' if mime.startswith('text/') or mime in (
+            'application/javascript', 'application/json') else '')
+        if name.endswith('.html'):
+            body = body.replace(b'__JOBFLOW_BUILD__', app_build(self.server.asset_directory).encode('ascii'))
+            self._respond(200, body, content_type)
+            return
+        # A weak validator covers both gzip and identity representations. Always
+        # revalidate so even an open tab requesting an older build URL gets an
+        # updated asset after a deployment, instead of a stale immutable entry.
+        etag = 'W/"' + hashlib.sha256(body).hexdigest() + '"'
+        headers = {'ETag': etag, 'Cache-Control': 'public, max-age=0, must-revalidate'}
+        candidates = [value.strip() for value in self.headers.get('If-None-Match', '').split(',')]
+        if '*' in candidates or any(value.removeprefix('W/') == etag[2:] for value in candidates):
+            self._respond(304, b'', content_type, headers)
+            return
+        self._respond(200, body, content_type, headers)
 
     def _error(self, error):
         self._respond(error.status if isinstance(error, WebError) else 400, {'error': str(error)})
@@ -585,16 +632,7 @@ class JobflowHandler(BaseHTTPRequestHandler):
                 raise WebError('Unknown API route.', 404)
             else:
                 relative = 'index.html' if path == '/' else path.lstrip('/')
-                if relative not in STATIC_ASSETS:
-                    raise WebError('File not found.', 404)
-                target = (self.server.asset_directory / relative).resolve()
-                if not target.is_relative_to(self.server.asset_directory) or not target.is_file():
-                    raise WebError('File not found.', 404)
-                mime = mimetypes.guess_type(str(target))[0] or 'application/octet-stream'
-                body = target.read_bytes()
-                if relative == 'index.html':
-                    body = body.replace(b'__JOBFLOW_BUILD__', app_build(self.server.asset_directory).encode('ascii'))
-                self._respond(200, body, mime + ('; charset=utf-8' if mime.startswith('text/') or mime in ('application/javascript', 'application/json') else ''))
+                self._asset(relative)
         except (WebError, ValueError, KeyError) as error:
             self._error(error)
         except (OSError, sqlite3.Error):

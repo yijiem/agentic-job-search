@@ -9,6 +9,8 @@ import json
 import os
 import re
 import tempfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
 
 BUCKET = 'jobflow-private'
@@ -16,6 +18,23 @@ MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_STORED_BYTES = 50 * 1024 * 1024
 CONFIG_FILES = ('config/settings.json', 'config/profile.json',
                 'config/onboarding.json', 'config/hosted.json')
+_read_cache = ContextVar('jobflow_file_read_cache', default=None)
+_UNSET = object()
+
+
+@contextmanager
+def file_read_cache():
+    """Reuse authoritative metadata only within one read-only HTTP request.
+
+    No metadata survives a request or crosses its execution context. Mutating
+    requests deliberately do not use this scope, so unpublished cache writes
+    cannot be mistaken for committed remote files.
+    """
+    token = _read_cache.set({'files': {}, 'manifests': {}})
+    try:
+        yield
+    finally:
+        _read_cache.reset(token)
 
 
 def is_remote_root(root):
@@ -82,12 +101,20 @@ def file_manifest(root, prefix=''):
     client, identifier = _context(root)
     if not client:
         return []
+    cache = _read_cache.get()
+    key = (identifier, prefix)
+    if cache is not None and key in cache['manifests']:
+        return cache['manifests'][key]
     rows, after = [], ''
     while True:
         page = client.rpc('jobflow_file_list', {'p_workspace': identifier,
                          'p_prefix': prefix, 'p_after': after, 'p_limit': 500}) or []
         rows.extend(page)
         if len(page) < 500:
+            if cache is not None:
+                cache['manifests'][key] = rows
+                for row in rows:
+                    cache['files'][identifier, row['path']] = row
             return rows
         next_after = page[-1]['path']
         if next_after <= after:
@@ -95,14 +122,22 @@ def file_manifest(root, prefix=''):
         after = next_after
 
 
-def ensure_file(root, relative, metadata=None):
+def ensure_file(root, relative, metadata=_UNSET):
     """Materialize current authoritative bytes, fetching only a missing version."""
     path = _path(root, relative)
     client, identifier = _context(root)
     if not client:
         return path
-    row = metadata if metadata is not None else client.rpc('jobflow_file_get',
-                    {'p_workspace': identifier, 'p_path': str(relative)})
+    cache = _read_cache.get()
+    key = (identifier, str(relative))
+    if metadata is not _UNSET:
+        row = metadata
+    elif cache is not None and key in cache['files']:
+        row = cache['files'][key]
+    else:
+        row = client.rpc('jobflow_file_get', {'p_workspace': identifier, 'p_path': str(relative)})
+    if cache is not None:
+        cache['files'][key] = row
     if row is None:
         # A leftover failed local write must never masquerade as durable state.
         if path.is_file():
@@ -193,8 +228,11 @@ def hydrate_workspace(root):
     """Fetch small configuration/metadata, leaving resume and report bodies lazy."""
     if not is_remote_root(root):
         return
+    # One bounded manifest request replaces four serial metadata lookups. An
+    # absent manifest row still removes a leftover failed local write.
+    config = {row['path']: row for row in file_manifest(root, 'config/')}
     for relative in CONFIG_FILES:
-        ensure_file(root, relative)
+        ensure_file(root, relative, metadata=config.get(relative))
     hydrate_upload_metadata(root)
 
 

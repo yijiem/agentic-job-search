@@ -109,17 +109,11 @@ class CloudHTTPTests(unittest.TestCase):
                 self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
                 if name.endswith('.woff2'):
                     self.assertEqual(headers['Content-Type'], 'font/woff2')
-        for path in ('/api/state', '/api/onboarding', '/api/profile', '/api/jobs/shared-id', '/api/version', '/api/background', '/app.js',
-                     '/my-account.js', '/my-account.css',
+        for path in ('/api/state', '/api/onboarding', '/api/profile', '/api/jobs/shared-id', '/api/background',
                      '/fonts/private.woff2', '/fonts/../config/profile.json',
                      '/api/batches', '/api/resumes', '/api/resumes/unknown',
-                     '/api/resume-reviews', '/api/resume-reviews/unknown', '/pdf-review.js',
-                     '/vendor/pdfjs/pdf.mjs', '/vendor/pdfjs/pdf.worker.mjs',
-                     '/resumes.js', '/resumes.css', '/api/application-resumes/unknown', '/browser-worker.zip',
-                     '/trends.js', '/maps.js', '/trends.css', '/maps.css', '/vendor/leaflet/leaflet.js',
-                     '/vendor/maplibre/maplibre-gl-csp.js',
-                     '/vendor/maplibre/maplibre-gl-csp-worker.js',
-                     '/vendor/maplibre/maplibre-gl.css', '/vendor/maplibre/leaflet-maplibre-gl.js'):
+                     '/api/resume-reviews', '/api/resume-reviews/unknown',
+                     '/api/application-resumes/unknown', '/browser-worker.zip'):
             with self.subTest(path=path):
                 status, unused, body = self.request('GET', path)
                 self.assertEqual(status, 401)
@@ -128,6 +122,24 @@ class CloudHTTPTests(unittest.TestCase):
         self.assertEqual(status, 303)
         self.assertEqual(headers['Location'], '/account')
         self.assertEqual(self.request('GET', '/api/account')[2], {'authenticated': False})
+
+    def test_public_assets_and_build_version_never_resolve_a_private_workspace(self):
+        assets = ('app.js', 'my-account.js', 'my-account.css', 'pdf-review.js',
+                  'vendor/pdfjs/pdf.mjs', 'vendor/pdfjs/pdf.worker.mjs',
+                  'resumes.js', 'resumes.css', 'trends.js', 'maps.js', 'trends.css', 'maps.css',
+                  'vendor/leaflet/leaflet.js', 'vendor/maplibre/maplibre-gl-csp.js',
+                  'vendor/maplibre/maplibre-gl-csp-worker.js', 'vendor/maplibre/maplibre-gl.css',
+                  'vendor/maplibre/leaflet-maplibre-gl.js')
+        with patch.object(self.server.accounts, 'session', side_effect=AssertionError('session lookup')), \
+                patch.object(self.server.accounts, 'workspace', side_effect=AssertionError('workspace lookup')):
+            for name in assets:
+                with self.subTest(asset=name):
+                    status, unused, body = self.request('GET', '/' + name, cookie='__Host-jobflow=expired')
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body, (self.server.asset_directory / name).read_bytes())
+            status, unused, body = self.request('GET', '/api/version', cookie='__Host-jobflow=expired')
+            self.assertEqual(status, 200)
+            self.assertEqual(set(body), {'app_build'})
 
     def test_lightweight_polling_does_not_hydrate_private_workspace(self):
         self.seed('owner@example.com', 'Owner')

@@ -69,6 +69,41 @@
   const pending = new Map();
   const instances = new Set();
   const viewports = new Map();
+  const assets = new Map();
+  let mapAssets = null;
+  let mapAssetsReady = Boolean(global.L && global.maplibregl && global.MaplibreGLLeaflet?.maplibreGL);
+  const assetURL = path => {
+    const build = global.document?.querySelector?.('meta[name="jobflow-build"]')?.content;
+    return path + (build && build !== '__JOBFLOW_BUILD__' ? '?v=' + encodeURIComponent(build) : '');
+  };
+  function loadAsset(path, stylesheet = false) {
+    if (assets.has(path)) return assets.get(path);
+    const loading = new Promise((resolve, reject) => {
+      const element = global.document.createElement(stylesheet ? 'link' : 'script');
+      if (stylesheet) {element.rel = 'stylesheet';element.href = assetURL(path);}
+      else element.src = assetURL(path);
+      element.onload = resolve;
+      element.onerror = () => {assets.delete(path);element.remove();reject(new Error('Map asset unavailable'));};
+      global.document.head.appendChild(element);
+    });
+    assets.set(path, loading);
+    return loading;
+  }
+  function loadMapAssets() {
+    if (!mapAssets) {
+      // The renderer is large and is unnecessary on Explore roles and most
+      // other pages. Load it only after a map enters the visible viewport.
+      mapAssets = Promise.all([
+        loadAsset('/vendor/leaflet/leaflet.css', true),
+        loadAsset('/vendor/maplibre/maplibre-gl.css', true),
+        global.L ? Promise.resolve() : loadAsset('/vendor/leaflet/leaflet.js'),
+        global.maplibregl ? Promise.resolve() : loadAsset('/vendor/maplibre/maplibre-gl-csp.js'),
+      ]).then(() => global.MaplibreGLLeaflet?.maplibreGL || loadAsset('/vendor/maplibre/leaflet-maplibre-gl.js'))
+        .then(() => {mapAssetsReady = true;})
+        .catch(error => {mapAssets = null;throw error;});
+    }
+    return mapAssets;
+  }
   function inCity(job, city) {
     let location = String(job.location || '').toLowerCase();
     if (city.name === 'San Francisco') location = location.replace(/south san francisco|san francisco bay area/g, '');
@@ -413,7 +448,7 @@
         host.querySelector('.jf-map-basemap-label').textContent = 'Vector street map';
         try {
           // The CSP distribution uses a same-origin worker, without blob scripts.
-          global.maplibregl.setWorkerUrl('/vendor/maplibre/maplibre-gl-csp-worker.js');
+          global.maplibregl.setWorkerUrl(assetURL('/vendor/maplibre/maplibre-gl-csp-worker.js'));
           layer = global.MaplibreGLLeaflet.maplibreGL({
             style:vectorStyles[mapTheme()],attributionControl:false,interactive:false,
             renderWorldCopies:false, maxZoom:18, padding:.15,
@@ -452,6 +487,19 @@
         }
       }
       function initialize() {
+        if (instance.destroyed || instance.map || !canvas.clientWidth || !canvas.clientHeight) return;
+        if (instance.assetsLoading) return;
+        if (mapAssetsReady) {startMap();return;}
+        instance.assetsLoading = true;
+        canvas.setAttribute('aria-busy','true');
+        host.querySelector('.jf-map-basemap-label').textContent = 'Loading street map…';
+        loadMapAssets().then(startMap, () => {
+          if (instance.destroyed) return;
+          if (global.L) startMap();
+          else showUnavailable('Street map could not load');
+        }).finally(() => {instance.assetsLoading=false;canvas.removeAttribute('aria-busy');});
+      }
+      function startMap() {
         if (instance.destroyed || instance.map || !canvas.clientWidth || !canvas.clientHeight) return;
         if (!global.L) {showUnavailable('Street map could not start');return;}
         const L = global.L;
@@ -505,7 +553,11 @@
       listen(canvas, 'keydown', () => {maintainFit=false;});
       listen(host.querySelector('.jf-map-fit'), 'click', () => {maintainFit=true;fitArea();});
       listen(selected.querySelector('button'), 'click', () => {data.selectedOffice='';markSelected('');drawMarkers();options.onSelect?.('');});
-      listen(host.querySelector('.jf-map-retry'), 'click', () => {if(instance.map)useVectorMap();else initialize();});
+      listen(host.querySelector('.jf-map-retry'), 'click', () => {
+        if (!instance.map) initialize();
+        else if (global.maplibregl && global.MaplibreGLLeaflet?.maplibreGL) useVectorMap();
+        else loadMapAssets().then(useVectorMap, () => useStandardMap('Standard map · vector renderer unavailable'));
+      });
       if (global.ResizeObserver) {
         instance.resize = new global.ResizeObserver(() => {
           const size = canvas.clientWidth + 'x' + canvas.clientHeight;

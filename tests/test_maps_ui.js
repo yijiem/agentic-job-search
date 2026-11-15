@@ -5,8 +5,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../jobflow/web_assets/maps.js'), 'utf8');
-function harness({rendererFails = false} = {}) {
-  const log = [], timers = new Map(), mutations = [], markers = [];
+function harness({rendererFails = false, lazyAssets = false} = {}) {
+  const log = [], timers = new Map(), mutations = [], markers = [], assets = [], intersections = [];
   let nextTimer = 0;
   const node = () => ({innerHTML:'',textContent:'',hidden:false,dataset:{},handlers:{},clientWidth:700,clientHeight:500,
     classList:{add(){},remove(){},toggle(){}},setAttribute(){},removeAttribute(){},contains(){return false;},
@@ -37,10 +37,24 @@ function harness({rendererFails = false} = {}) {
   const win = {document:doc,L,maplibregl:{setWorkerUrl(url){log.push(['worker',url]);}},
     MaplibreGLLeaflet:{maplibreGL(options){log.push(['vector',options.style]);if(rendererFails)throw new Error('WebGL unavailable');return layer;}},
     MutationObserver:class {constructor(fn){this.fn=fn;mutations.push(this);}observe(){}disconnect(){log.push(['disconnect-theme']);}}};
+  const vendors = {L:win.L,maplibregl:win.maplibregl,MaplibreGLLeaflet:win.MaplibreGLLeaflet};
+  if (lazyAssets) {
+    delete win.L;delete win.maplibregl;delete win.MaplibreGLLeaflet;
+    doc.createElement = tagName => ({tagName,remove(){this.removed=true;}});
+    doc.head = {appendChild(element){assets.push(element);}};
+    doc.querySelector = () => ({content:'test-build'});
+    win.IntersectionObserver = class {constructor(fn){this.fn=fn;intersections.push(this);}observe(){}disconnect(){}};
+  }
   const ctx = vm.createContext({window:win,document:doc,Intl,Map,Set,console,
     setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}});
   vm.runInContext(source,ctx);
-  return {api:win.JobflowMaps,doc,host,nodes,log,timers,mutations,glHandlers,markers,
+  return {api:win.JobflowMaps,doc,host,nodes,log,timers,mutations,glHandlers,markers,assets,intersections,
+    completeAsset(element){
+      if (element.src?.includes('/leaflet/leaflet.js')) win.L=vendors.L;
+      if (element.src?.includes('/maplibre-gl-csp.js')) win.maplibregl=vendors.maplibregl;
+      if (element.src?.includes('/leaflet-maplibre-gl.js')) win.MaplibreGLLeaflet=vendors.MaplibreGLLeaflet;
+      element.onload();
+    },
     mount(jobs,settings={},callbacks={}){const html=win.JobflowMaps.render(jobs,true,'',settings);host.id=/id="([^"]+)"/.exec(html)[1];win.JobflowMaps.mount({querySelectorAll(){return [host];}},callbacks);return html;},
     click(selector,dataset){host.handlers.click({target:{closest(value){return value===selector ? {dataset} : null;}}});}};
 }
@@ -214,3 +228,43 @@ const office = {id:'office-example',company:'Example',city:'San Francisco',addre
   h.api.destroy();
 }
 console.log('Map renderer lifecycle checks passed.');
+async function lazyLoadingChecks() {
+  const settle=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
+  {
+    const h=harness({lazyAssets:true});h.mount([role]);
+    assert.equal(h.assets.length,0,'Offscreen maps do not download renderers');
+    h.intersections[0].fn([{isIntersecting:true}]);
+    assert.equal(h.assets.length,4,'Visible map loads its CSS and independent renderers in parallel');
+    h.intersections[0].fn([{isIntersecting:true}]);
+    assert.equal(h.assets.length,4,'Repeated visibility signals share pending requests');
+    assert.ok(h.assets.every(asset=>(asset.src||asset.href).endsWith('?v=test-build')),'Lazy assets retain the page build version');
+    h.assets.slice(0,4).forEach(h.completeAsset);await settle();
+    assert.equal(h.assets.length,5,'Leaflet adapter loads only after both renderer dependencies');
+    assert.ok(!h.log.some(entry=>entry[0]==='vector'),'Map waits for the adapter');
+    h.completeAsset(h.assets[4]);await settle();
+    assert.equal(h.log.filter(entry=>entry[0]==='vector').length,1);
+    assert.deepEqual(h.log.find(entry=>entry[0]==='worker'),['worker','/vendor/maplibre/maplibre-gl-csp-worker.js?v=test-build']);
+    h.api.destroy();h.mount([role]);h.intersections.at(-1).fn([{isIntersecting:true}]);
+    assert.equal(h.assets.length,5,'Remount reuses downloaded renderer assets');h.api.destroy();
+  }
+  {
+    const h=harness({lazyAssets:true});h.mount([role]);h.intersections[0].fn([{isIntersecting:true}]);
+    h.api.destroy();h.assets.slice(0,4).forEach(h.completeAsset);await settle();
+    h.completeAsset(h.assets[4]);await settle();
+    assert.ok(!h.log.some(entry=>entry[0]==='vector'),'Navigation away prevents mounting a detached map');
+  }
+  {
+    const h=harness({lazyAssets:true});h.mount([role]);h.intersections[0].fn([{isIntersecting:true}]);
+    const failed=h.assets.find(asset=>asset.src?.includes('/leaflet/leaflet.js'));
+    for(const asset of h.assets) {if(asset===failed)asset.onerror();else h.completeAsset(asset);}
+    await settle();
+    assert.equal(h.nodes.get('.jf-map-status').hidden,false,'Renderer failure leaves a visible retry path');
+    h.nodes.get('.jf-map-retry').handlers.click();
+    assert.equal(h.assets.length,5,'Retry requests only the failed dependency');
+    assert.ok(failed.removed);h.completeAsset(h.assets[4]);await settle();
+    h.completeAsset(h.assets[5]);await settle();
+    assert.ok(h.log.some(entry=>entry[0]==='vector'),'Explicit retry can recover the map');h.api.destroy();
+  }
+  console.log('Lazy map asset loading checks passed.');
+}
+lazyLoadingChecks().catch(error=>{console.error(error);process.exitCode=1;});

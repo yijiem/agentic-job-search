@@ -143,9 +143,47 @@ The workspace starts in light mode from 7 a.m. to 7 p.m. in your browser’s loc
 
 ## Verification
 
+Initial loading starts `/api/state` alongside the UI downloads. Leaflet and
+MapLibre load only when a map becomes visible; role browsing does not download
+them. Public scripts, styles, fonts and logos use conditional HTTP caching, and
+text assets support gzip. HTML and private API responses retain `no-store`.
+The UI build fingerprint detects file changes without rereading every unchanged
+asset on each request.
+
+Hosted reads reuse file metadata within a single read-only request and validate
+onboarding without loading the resume library. Every new private request still
+checks its session and current remote metadata. Writes and email callbacks do
+not use this read cache. Public allowlisted assets and `/api/version` require no
+account or storage lookup. Workspace records use bounded 500-row UI pages, with
+smaller-page fallback for oversized responses and the existing revision checks.
+
+The initial-load regression fixture measures the following remote RPC counts
+with cached configuration bytes and no job records:
+
+| Request | Before | After |
+| --- | ---: | ---: |
+| Authenticated entry HTML | 15 | 4 |
+| Initial `/api/state` | 22 | 6 |
+| `/api/account` | 20 | 7 |
+| Each previously authenticated static asset | 2 | 0 |
+| `/api/version` | 1 | 0 |
+
+Larger workspaces add record pages; a cold file cache also downloads missing
+objects. These counts are deterministic test measurements, not a promise of
+hosted wall-clock latency. The removed initial map assets total about 1.21 MB
+(1.13 MB JavaScript plus CSS). Render's free-instance wake-up delay is separate
+from the application's request work; see [Render's free web service limits](https://render.com/docs/free).
+
 ```sh
 python3 -m unittest discover -s tests -q
 ```
+
+`tests/test_initial_load.py` protects remote request counts. The cloud,
+remote-file and magic-link tests cover fresh metadata, authentication boundaries
+and callback behavior. `node tests/test_startup_ui.js`
+checks early loading, single consumption, retry and sign-in redirects;
+`node tests/test_maps_ui.js` also checks deferred downloads and navigation while
+map assets are loading.
 
 Web tests use temporary workspaces, not personal application records. Source polling remains separate from these offline tests.
 
