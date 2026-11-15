@@ -100,8 +100,17 @@ class CloudHTTPTests(unittest.TestCase):
         return account, root
 
     def test_unauthenticated_private_apis_denied_and_home_redirects(self):
+        for name in ('styles.css', 'theme.js', 'fonts/nunito-latin.woff2', 'fonts/dm-serif-display-latin.woff2'):
+            with self.subTest(public_asset=name):
+                status, headers, body = self.request('GET', '/' + name + '?v=build')
+                self.assertEqual(status, 200)
+                self.assertEqual(body, (self.server.asset_directory / name).read_bytes())
+                self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+                if name.endswith('.woff2'):
+                    self.assertEqual(headers['Content-Type'], 'font/woff2')
         for path in ('/api/state', '/api/onboarding', '/api/profile', '/api/jobs/shared-id', '/api/version', '/api/background', '/app.js',
                      '/my-account.js', '/my-account.css',
+                     '/fonts/private.woff2', '/fonts/../config/profile.json',
                      '/api/batches', '/api/resumes', '/api/resumes/unknown',
                      '/api/resume-reviews', '/api/resume-reviews/unknown', '/pdf-review.js',
                      '/vendor/pdfjs/pdf.mjs', '/vendor/pdfjs/pdf.worker.mjs',

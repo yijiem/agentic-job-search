@@ -268,7 +268,8 @@ class CloudHandler(JobflowHandler):
                 self._respond(200, b"history.replaceState(null, '', '/account'); location.replace('/');",
                               'application/javascript; charset=utf-8')
                 return
-            if path in ('/account', '/account.html', '/account.js', '/account.css', '/styles.css'):
+            if path in ('/account', '/account.html', '/account.js', '/account.css', '/styles.css',
+                        '/theme.js', '/fonts/nunito-latin.woff2', '/fonts/dm-serif-display-latin.woff2'):
                 self._asset('account.html' if path == '/account' else path.lstrip('/'))
                 return
             session, unused = self._session(required=False)
