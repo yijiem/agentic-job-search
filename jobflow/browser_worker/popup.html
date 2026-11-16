@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Jobflow browser worker</title><link rel="stylesheet" href="popup.css"><script src="popup.js" defer></script></head>
+<body><header><span class="eyebrow">JOBFLOW</span><h1>Browser worker</h1><p>Inspect application forms. Submit the applications you reviewed in Jobflow.</p></header>
+<div id="status" role="status" aria-live="polite">Connecting to the worker…</div>
+<p id="version" class="small"></p><p id="workspace" class="small"></p><p id="counts" class="small"></p>
+<div class="buttons"><button id="connect">Connect this Jobflow tab</button><button id="start" class="primary" disabled>Grant employer access & start</button><button id="stop" disabled>Stop worker</button><button id="open-task" disabled>Open employer task</button></div>
+<details><summary>Requested employer access</summary><p class="small">Access is limited to the employer domains listed below. New domains require another click on Start. Keep your connected Jobflow tab open.</p><ul id="origins"></ul></details>
+<p class="small">Forms are inspected without uploading materials. Authorized submissions may upload your reviewed resume and answers. Login, verification, unsupported controls, and uncertain results need your attention.</p><button id="disconnect" class="text">Disconnect workspace</button>
+</body></html>

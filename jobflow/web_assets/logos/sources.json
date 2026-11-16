@@ -1,0 +1,936 @@
+{
+  "observed_at": "2026-11-14",
+  "logos": [
+    {
+      "company": "Affirm",
+      "file": "affirm.png",
+      "source": "embedded icon in https://www.affirm.com/",
+      "page": "https://www.affirm.com/",
+      "sha256": "93cad629ac77f5884bcc031401e3aebe9271aa94b6e70d613091818c4a38dc36"
+    },
+    {
+      "company": "AiPrise",
+      "file": "aiprise.png",
+      "source": "https://cdn.prod.website-files.com/6ab386c843dcffcda20271c0/6ae463671a7357dcbd9da9f0_Webclip.png",
+      "page": "https://www.aiprise.com/",
+      "sha256": "57f1521f606e69ef8d07c0741be9880a0daed9025cac0aabc7ae1f0d5d481da0"
+    },
+    {
+      "company": "Airbnb",
+      "file": "airbnb.ico",
+      "source": "https://careers.airbnb.com/wp-content/themes/airbnb-careers/favicon.ico",
+      "page": "https://careers.airbnb.com/",
+      "sha256": "9ba669d9ce07a2d4689edadaf5178a3296442567f4006e8e0e7de94b845c4a81"
+    },
+    {
+      "company": "Airwallex",
+      "file": "airwallex.png",
+      "source": "https://careers.airwallex.com/wp-content/uploads/2024/03/cropped-airwallex-favicon-180x180.png",
+      "page": "https://careers.airwallex.com/",
+      "sha256": "4ec22c36c611fb7477f3ec3f60d1f03ec09492e1ce351bc731892984b561b879"
+    },
+    {
+      "company": "Altruist",
+      "file": "altruist.png",
+      "source": "https://cdn-ilekjee.nitrocdn.com/ufbsZrKsffoksgxlFykbtlwORXVsbLSv/assets/images/optimized/rev-5c24ab9/cdn.prod.altruistnet.tech/wp-content/uploads/2025/06/cropped-favicon-96x96-1-180x180.png",
+      "page": "https://altruist.com/",
+      "sha256": "269114e4dcfd5133a60ac26599a7410f46006b1a0ce36a06f09f46c5e0c406d0"
+    },
+    {
+      "company": "Ambient.ai",
+      "file": "ambient-ai.png",
+      "source": "https://cdn.prod.website-files.com/696e308b948dd4131d5959ff/6994378b485fadc05206d3e6_Webclip.png",
+      "page": "https://www.ambient.ai/",
+      "sha256": "9c493a3d8a4428682fa8da1bf5370965774e6a91d95422ba97d1454da3b6f984"
+    },
+    {
+      "company": "Anduril",
+      "file": "anduril.png",
+      "source": "https://www.anduril.com/assets/favicon/apple-touch-icon.xxx1TpF2gg.png",
+      "page": "https://www.anduril.com/",
+      "sha256": "67f9c55f1783bdf12e6a040d649eaab9714f480a446303d03378e445d02b22b3"
+    },
+    {
+      "company": "Anthropic",
+      "file": "anthropic.png",
+      "source": "https://www.anthropic.com/images/icons/apple-touch-icon.png",
+      "page": "https://www.anthropic.com/",
+      "sha256": "40e3900fcb3ad237af6869dbd40e77efc8eb23549c478125b40e563ac74423cb"
+    },
+    {
+      "company": "Anyscale",
+      "file": "anyscale.png",
+      "source": "https://www.anyscale.com/static/favicon-new.ico",
+      "page": "https://www.anyscale.com/",
+      "sha256": "c6335fe424e4d84ac81b30cc8c56071651b46da8f5fe0f7912e01449897e47ca"
+    },
+    {
+      "company": "Applied Intuition",
+      "file": "applied-intuition.png",
+      "source": "https://www.appliedintuition.com/apple-icon.png?apple-icon.2fsmttxfzk3j5.png",
+      "page": "https://www.appliedintuition.com/",
+      "sha256": "0801597388c99e45c5d10ba57e7d9553f62f1cc1b4cb4ff53f72171f3dcbbfed"
+    },
+    {
+      "company": "BNSF",
+      "file": "bnsf.png",
+      "source": "https://cdn.phenompeople.com/CareerConnectResources/BRSBRWUS/en_us/desktop/assets/images/h/apple-touch-icon.png",
+      "page": "https://jobs.bnsf.com/us/en",
+      "sha256": "ceeb07422af46307d35cc9862279de08ee225bf92c9500655e466be6a48d053b"
+    },
+    {
+      "company": "Baseten",
+      "file": "baseten.png",
+      "source": "https://www.datocms-assets.com/104802/1792619555-favicon.png",
+      "page": "https://www.baseten.co/",
+      "sha256": "e396af05d5d98f7597828e855a263763608dd0abc89ccbd492eb11cae7da14a2"
+    },
+    {
+      "company": "Bitdeer",
+      "file": "bitdeer.ico",
+      "source": "https://www.bitdeer.com/favicon.ico",
+      "page": "https://www.bitdeer.com/",
+      "observed_at": "2026-11-15",
+      "sha256": "a19ae70f09bda8614f8c161d72a4298ae9eb38cb6365888855af1943146b2997"
+    },
+    {
+      "company": "Block",
+      "file": "block.png",
+      "source": "https://block.xyz/apple-touch-icon-reskin.png",
+      "page": "https://block.xyz/",
+      "sha256": "46879e0991b68f0d6759eec8bd7e3f416dde30247f18a999e29f318aa92741f3"
+    },
+    {
+      "company": "Bot Auto",
+      "file": "bot-auto.png",
+      "source": "https://framerusercontent.com/images/3Gt78n5aN0jCfU5s2E8wJiQg0.png",
+      "page": "https://bot.auto/",
+      "sha256": "0410ebb558bcc0cf364fd823652f341fac62ce33130baab0e711d592aae3f695"
+    },
+    {
+      "company": "Brex",
+      "file": "brex.ico",
+      "source": "https://www.brex.com/favicon.ico",
+      "page": "https://www.brex.com/",
+      "sha256": "d3520b8ed453ee975ad028c8c56bd025bf85ccbf59c07f5ffecf93615d541252"
+    },
+    {
+      "company": "C3 AI",
+      "file": "c3-ai.png",
+      "source": "https://c3.ai/apple-touch-icon.png",
+      "page": "https://c3.ai/",
+      "sha256": "1e354176a203bd6114608d4a6d6666861271a28888dbe1fc07d0a96cb842a0ba"
+    },
+    {
+      "company": "Candid Health",
+      "file": "candid-health.png",
+      "source": "https://candidhealth.com/favicon.png",
+      "page": "https://candidhealth.com/",
+      "sha256": "ca97bf61479b237468af3457f9e2d0c89271e6bf4c65ff813e534892ca47e485"
+    },
+    {
+      "company": "Charta Health",
+      "file": "charta-health.png",
+      "source": "https://cdn.prod.website-files.com/697bac58e9de4034f20cb7a7/6995f67185e5f59456c8db73_Webclip.png",
+      "page": "https://www.chartahealth.com/",
+      "sha256": "1758d6937e02922fcf7e660539e55fc4176b51be3f94767b5f07e7d6856929c2"
+    },
+    {
+      "company": "Clay",
+      "file": "clay.png",
+      "source": "https://cdn.prod.website-files.com/61477f2c24a826836f969afe/6a3a92ab3c92c9caa6245619_dot-com_favicon_2026_512.png",
+      "page": "https://www.clay.com/",
+      "sha256": "512e02eaedbf36404ad8b3df4e7411ddd86aae38d68206174360893a1c410220"
+    },
+    {
+      "company": "Close",
+      "file": "close.png",
+      "source": "https://close.com/apple-touch-icon.png",
+      "page": "https://close.com/",
+      "sha256": "95f6770978fe1b20f1f1e809169579db085330e4a1473be3e88dfd84070bc415"
+    },
+    {
+      "company": "Cognitiv",
+      "file": "cognitiv.jpg",
+      "source": "https://cdn.prod.website-files.com/668f2b8d666e30fee46b1df1/66cd0593eec5cf639ccbe528_Cognitiv_favicon_256x256.jpg",
+      "page": "https://www.cognitiv.ai/",
+      "sha256": "5fe714f526b37af4a370470edcf737fc97ce47a66c22cd71f1ce48543a4f76ff"
+    },
+    {
+      "company": "Cohere",
+      "file": "cohere.png",
+      "source": "https://cohere.com/apple-touch-icon.png",
+      "page": "https://cohere.com/",
+      "sha256": "3403a04361a061b7e765e85e746b961a601a73015d4569baef9e781ec89a0286"
+    },
+    {
+      "company": "Coinbase",
+      "file": "coinbase.png",
+      "source": "https://www.coinbase.com/favicon.ico",
+      "page": "https://www.coinbase.com/",
+      "sha256": "d31e282ffb3bb5dd30928d26363a710a61d3909673cfb551f10195517c34e30b"
+    },
+    {
+      "company": "Commure",
+      "file": "commure.png",
+      "source": "https://cdn.prod.website-files.com/66b319e3933cb4cb9c43ebdc/66c611ce555fa73ad08a3de0_commure%20favicon%20256x256.png",
+      "page": "https://www.commure.com/",
+      "sha256": "cedcb35509440e59abeb87ea19d1dcdc811992596cb4121888e3ae9ce45e0451"
+    },
+    {
+      "company": "CoreWeave",
+      "file": "coreweave.png",
+      "source": "https://cdn.prod.website-files.com/62ba1fb86485b6d5029975c4/676dd39272d1e888a56c48ad_logo_coreweave_solo_256x256.png",
+      "page": "https://www.coreweave.com/",
+      "sha256": "1dc8e5dbf1295d06f597065bde58bb58ea6d43386f689fc57fe3b24b5b14d44a"
+    },
+    {
+      "company": "Coupang",
+      "file": "coupang.ico",
+      "source": "https://www.coupang.jobs/favicon.ico",
+      "page": "https://www.coupang.jobs/",
+      "sha256": "180e5347ffcaf368bc4e8d621ddb9cc4b2a710d702c37101858a9ed964ebd337"
+    },
+    {
+      "company": "Cresta",
+      "file": "cresta.png",
+      "source": "https://cdn.prod.website-files.com/67fe49bf21b9f9d5b910d3c9/687226ba77f454c5d9b0e9d2_webclip.png",
+      "page": "https://cresta.com/",
+      "sha256": "8ffa0ac7cd057d78d6fa2819144ce173df1cc991495b53d43cdc8e1d5105df82"
+    },
+    {
+      "company": "Crusoe",
+      "file": "crusoe.png",
+      "source": "https://cdn.prod.website-files.com/6855c1aa175582ee23e0aa19/68934b7ef165ad996914d921_Webclip.png",
+      "page": "https://www.crusoe.ai/",
+      "sha256": "adb285ac92ad3066d12f12e914aa7e4ce3a5af4361aa503f930038bb3ec251c6"
+    },
+    {
+      "company": "Cursor",
+      "file": "cursor.png",
+      "source": "https://cursor.com/marketing-static/apple-touch-icon-light.png",
+      "page": "https://cursor.com/",
+      "sha256": "a57fcff6994c83bd2acc0ea84d8b950b0ace6e00c1bf25d9abc7d15704de73db"
+    },
+    {
+      "company": "Databricks",
+      "file": "databricks.png",
+      "source": "https://www.databricks.com/en-website-assets/icons/icon-48x48.png?v=c9b9916c3b27dc51866c46b79a6e9b88",
+      "page": "https://www.databricks.com/",
+      "sha256": "3cab979e24ea08691f383fe4d7e6a890ae47c4fd8cd060c98db2e57e5c8f4ff7"
+    },
+    {
+      "company": "DatologyAI",
+      "file": "datologyai.png",
+      "source": "https://www.datologyai.com/apple-touch-icon.png",
+      "page": "https://www.datologyai.com/",
+      "sha256": "7550432aeb497d4530e78b1fd2a9fdbea0cbcab689db97f5790bbd7d43299302"
+    },
+    {
+      "company": "Decagon",
+      "file": "decagon.png",
+      "source": "https://cdn.prod.website-files.com/683e5da0b6d8a19de4875ae7/683e5da0b6d8a19de4875b60_webclip.png",
+      "page": "https://decagon.ai/",
+      "sha256": "352c0e4b6d043921892db1ec670faa7594a0304282f23a46161de1cc2786f33d"
+    },
+    {
+      "company": "Deploy (Hive)",
+      "file": "deploy-hive.png",
+      "source": "https://deploy.com/apple-touch-icon.png",
+      "page": "https://deploy.com/",
+      "sha256": "1c1387475abe44589fbf99622fcf557efbc1e3f9bc718ff876584153a326b186"
+    },
+    {
+      "company": "DigitalOcean",
+      "file": "digitalocean.png",
+      "source": "https://www.digitalocean.com/_do-www-marketing/9221ebb1/_next/static/media/apple-touch-icon.9537f22a.png",
+      "page": "https://www.digitalocean.com/",
+      "sha256": "6cc0fbb307c7fa878642b68b5ebdd6babf55ed19d015bb33d98c6cf78381be29"
+    },
+    {
+      "company": "Discord",
+      "file": "discord.ico",
+      "source": "https://cdn.prod.website-files.com/6257adef93867e50d84d30e2/6266bc493fb42d4e27bb8393_847541504914fd33810e70a0ea73177e.ico",
+      "page": "https://discord.com/",
+      "sha256": "0ff2884845f93cd730470ad755f5c38d334e6976ad59c8016b1353b8e30e64f8"
+    },
+    {
+      "company": "Docker",
+      "file": "docker.png",
+      "source": "https://www.docker.com/app/uploads/2024/02/cropped-docker-logo-favicon-180x180.png",
+      "page": "https://www.docker.com/",
+      "sha256": "5cb5caeeef34a0979a0b21640ea6bbbfb8345a9fff0d0e910c345ce4d0b65718"
+    },
+    {
+      "company": "DoubleVerify",
+      "file": "doubleverify.svg",
+      "source": "https://doubleverify.com/hubfs/DV_Website_FavIcon.svg",
+      "page": "https://doubleverify.com/",
+      "observed_at": "2026-11-15",
+      "sha256": "f82a9b9b68f28b9644965b3c55f08672293a39525fcb50d9f8469dd8cbf167ad",
+      "note": "Official favicon; embedded CSS fills converted to SVG fill attributes, preserving paths and colors. Embedded styles removed."
+    },
+    {
+      "company": "Elation Health",
+      "file": "elation-health.webp",
+      "source": "https://www.elationhealth.com/wp-content/uploads/2024/08/Copy-of-icon_logo_color_path-4-300x300.webp",
+      "page": "https://www.elationhealth.com/",
+      "sha256": "30d3a48b8a12e4516329b52493d7e42ae4856a0be46ef3bc04e1a537578c2d78"
+    },
+    {
+      "company": "ElevenLabs",
+      "file": "elevenlabs.png",
+      "source": "https://elevenlabs.io/apple-icon.png?6592732ab34b1d42",
+      "page": "https://elevenlabs.io/",
+      "sha256": "7936b8ae0c53b049edec573876bfb2b44b450fdce10675bd98f29182833d373e"
+    },
+    {
+      "company": "EliseAI",
+      "file": "eliseai.png",
+      "source": "https://cdn.prod.website-files.com/63cc1eef179b054a9306598d/6a8466b644f22d500416f5b7_favicon.png",
+      "page": "https://eliseai.com/",
+      "sha256": "f3e0ac5d93c14b0d131f31ec345b85c428c564b514b077ab22e49f68c8df3168"
+    },
+    {
+      "company": "Etched",
+      "file": "etched.png",
+      "source": "https://www.etched.com/apple-icon-276.png",
+      "page": "https://www.etched.com/",
+      "sha256": "b9bbced2b349bc86f5a1f03ad0bfcf3c101fc1ce77da14b7185ee1bed20f32cb"
+    },
+    {
+      "company": "Everpure (Pure Storage)",
+      "file": "everpure-pure-storage.ico",
+      "source": "https://www.everpuredata.com/etc.clientlibs/purestorage-com/clientlibs/clientlib-page/resources/img/favicon.ico",
+      "page": "https://www.everpuredata.com/",
+      "sha256": "2caf7f14c4bf30a18a11c73c2034278ad68261c5af85e2c58a28f1283b53a24e"
+    },
+    {
+      "company": "Exa",
+      "file": "exa.png",
+      "source": "https://exa.ai/images/favicon-32x32.png",
+      "page": "https://exa.ai/",
+      "sha256": "4710f29ee916cecca32c61f3a15ecf939399f74faef6aea861a333ecc910d37b"
+    },
+    {
+      "company": "FAR.AI",
+      "file": "far-ai.png",
+      "source": "https://cdn.prod.website-files.com/6a1367b300e755d2620f62ba/6a2d2d69931400223a7bcf4c_Favicon%20-%20light.png",
+      "page": "https://www.far.ai/",
+      "sha256": "54faf7f108462a902202a682cd846072b47ff98ba8b309bd204c201eb5116792"
+    },
+    {
+      "company": "Faire",
+      "file": "faire.png",
+      "source": "https://www.faire.com/apple-touch-icon.png",
+      "page": "https://www.faire.com/",
+      "sha256": "7877ee54fca5fc8de54530c9ef8b83e4af1b394c4ce71279bef207520808ea64"
+    },
+    {
+      "company": "Figma",
+      "file": "figma.png",
+      "source": "https://static.figma.com/app/icon/2/touch-76.png",
+      "page": "https://www.figma.com/",
+      "sha256": "a70db90a2a7c18f811cac60e65e26155403dc4ba23fc137da1564ef010125d69"
+    },
+    {
+      "company": "Fireworks AI",
+      "file": "fireworks-ai.png",
+      "source": "https://fireworks.ai/apple-icon.png?7a21affc7a2d4744",
+      "page": "https://fireworks.ai/",
+      "sha256": "2dd00389bc12ba945b9035b710aa8af137b53f13053df74c010b3b39c9aa79b7"
+    },
+    {
+      "company": "Flexport",
+      "file": "flexport.png",
+      "source": "https://www.flexport.com/apple-touch-icon.png",
+      "page": "https://www.flexport.com/",
+      "sha256": "4d0421e6ba588a7fb93ce4f20d168a7038b791fbff04e5b764c4046c25c1447d"
+    },
+    {
+      "company": "Fluidstack",
+      "file": "fluidstack.png",
+      "source": "https://fluidstack.io/apple-icon.png?apple-icon.0_.103wpqkpxr.png?dpl=dpl_9k1ZYJSgX9eyL6oHu9zWeR4Kpj6U",
+      "page": "https://fluidstack.io/",
+      "sha256": "67802f0e7fed530db49909080b7e421e43e579badee038305abd1f02194d2bc5"
+    },
+    {
+      "company": "Ford",
+      "file": "ford.png",
+      "source": "https://tbcdn.talentbrew.com/company/48560/v1/img/favicon.png",
+      "page": "https://www.careers.ford.com/en",
+      "sha256": "3b10e9df3e3771b636fa51b8dea519942dfa65240ba0e362e2c2ee70f75792a8"
+    },
+    {
+      "company": "Giga",
+      "file": "giga.png",
+      "source": "https://giga.ai/apple-icon.png?apple-icon.0guitfded4vbb.png?dpl=dpl_25jrkZV9v7ERbzpADFY2L3DdTpmN",
+      "page": "https://giga.ai/",
+      "sha256": "c93f9f6bad4514fe43b9d64783ccfff39043ee93565512ea9d874be1ea2bcc09"
+    },
+    {
+      "company": "Gimlet Labs",
+      "file": "gimlet-labs.svg",
+      "source": "https://gimletlabs.ai/shared-assets/favicon-adaptive.svg",
+      "page": "https://gimletlabs.ai/",
+      "sha256": "879476c987ab79655f1428309a82bbd5e4f4af3d5d7112514120b137da1b4e26"
+    },
+    {
+      "company": "Glean",
+      "file": "glean.png",
+      "source": "https://cdn.prod.website-files.com/6127a84dfe068e153ef20572/67189bfac8da27b3a70ddd93_256%20x%20256%20Glean%20Favicon.png",
+      "page": "https://www.glean.com/",
+      "sha256": "855e6a99c57f2b73dacb37be9680d1c38df2be5246b64902d8e1e5a96ae9c407"
+    },
+    {
+      "company": "Handshake",
+      "file": "handshake.png",
+      "source": "https://joinhandshake.com/icons/icon-180.png",
+      "page": "https://joinhandshake.com/",
+      "sha256": "75e5095df6244b88a4ba762a9a1948d52041236331b0e712d72d0049d264fd7d"
+    },
+    {
+      "company": "Harvey",
+      "file": "harvey.png",
+      "source": "https://www.harvey.ai/icons/brand-favicon.png",
+      "page": "https://www.harvey.ai/",
+      "sha256": "84ecac480db644bea938ff76e302b9476d539d50c446d96e99815ca1b7dc9460"
+    },
+    {
+      "company": "Helm.ai",
+      "file": "helm-ai.png",
+      "source": "https://cdn.prod.website-files.com/65f47b0c0401bc4c08dd802a/6664edcabcd4c93b85b3c222_256x256.png",
+      "page": "https://helm.ai/",
+      "sha256": "ee989d119ee61c71f44943cd104ae1164f9f8fedc91d60373e118eac42410c88"
+    },
+    {
+      "company": "Hex",
+      "file": "hex.png",
+      "source": "https://hex.tech/favicon-96x96.png",
+      "page": "https://hex.tech/",
+      "sha256": "a4c0e49c47455e642a8b18621ebcfa0779c8b593a83711760be880644f18bc66"
+    },
+    {
+      "company": "Hotplate",
+      "file": "hotplate.webp",
+      "source": "https://framerusercontent.com/images/dznkH8J6arBadqCPHjox1OAKVg.png",
+      "page": "https://www.hotplate.com/",
+      "sha256": "d66204f95db6e781bfac26fba84ae3d4176a28bc96780f1f6589c7d732001d35"
+    },
+    {
+      "company": "IXL Learning",
+      "file": "ixl-learning.png",
+      "source": "https://www.ixl.com/ixl-favicon.png",
+      "page": "https://www.ixl.com/",
+      "sha256": "68c7e088b40d173c3b6b6548ac7d7d95a2bef5bc1f5ae6ce84d4023e8ba611df"
+    },
+    {
+      "company": "InstaLILY",
+      "file": "instalily.ico",
+      "source": "https://www.instalily.ai/favicon.ico?favicon.0jzok-llbl96k.ico",
+      "page": "https://www.instalily.ai/",
+      "sha256": "5c5cc60f91de89fd404c8858039936e4204368cbee50bf178eeaa5a04d1d8389"
+    },
+    {
+      "company": "Instacart",
+      "file": "instacart.png",
+      "source": "https://www.instacart.careers/static/apple-touch-icon.png",
+      "page": "https://www.instacart.careers/",
+      "sha256": "9f252b6e81126e3da0a5b3e356225fe517d6149ee3e875bcac1cc87f7ae7978d"
+    },
+    {
+      "company": "Institute of Foundation Models",
+      "file": "institute-of-foundation-models.png",
+      "source": "https://careers.mbzuai.ac.ae/wp-content/uploads/2026/08/cropped-favicon-1-32x32.png",
+      "page": "https://careers.mbzuai.ac.ae/",
+      "sha256": "12ccf00eb551cda43591ebb744cb09b1126d35c59f1b7136dd0fd5f71bc85cc2"
+    },
+    {
+      "company": "Ivo",
+      "file": "ivo.png",
+      "source": "https://cdn.prod.website-files.com/65f4b30742f9be11e8959d5c/696fa63b7a99f2c019be0da3_Webclip.png",
+      "page": "https://www.ivo.ai/",
+      "sha256": "8df4568bec7ccdf23e0c98b78fc11623fac3f65f307c16fe243f141c7c597e62"
+    },
+    {
+      "company": "Kikoff",
+      "file": "kikoff.png",
+      "source": "https://cdn.prod.website-files.com/670451e8b8508fdd065053c3/69950d63d010b654ed71666a_webclip.png",
+      "page": "https://about.kikoff.com/",
+      "sha256": "fced6ce032ed66a657b375212e6430f4d7b91882fafc0955a383c5e978bfce55"
+    },
+    {
+      "company": "Lambda",
+      "file": "lambda.png",
+      "source": "https://lambda.com/hubfs/raw_assets/33/public/@projects/Lambda%20Marketing%20Website/lambda-theme/assets/static/img/apple-touch-icon-180x180.png",
+      "page": "https://lambda.com/",
+      "sha256": "dfe6ae597f8b22c984e66c70447fa6685cd1feb53b0300e9c1b2bdf03348482f"
+    },
+    {
+      "company": "Liftoff",
+      "file": "liftoff.svg",
+      "source": "https://liftoff.ai/wp-content/themes/liftoff/images/favicon.svg?v=3",
+      "page": "https://liftoff.ai/",
+      "sha256": "c988aab840e44b483736a015aadeec3f265652018bb68ef380d3aea433a30bff",
+      "note": "Static path fill retained from the source stylesheet; dynamic color-scheme styles removed."
+    },
+    {
+      "company": "Lyft",
+      "file": "lyft.png",
+      "source": "https://www.lyft.com/favicon.ico",
+      "page": "https://www.lyft.com/",
+      "sha256": "f439d0914343548fb7cecfa5a2f051b63186abf92b73e0705623886aeb7c6098"
+    },
+    {
+      "company": "Maven Clinic",
+      "file": "maven-clinic.png",
+      "source": "https://cdn.prod.website-files.com/5fb2b678e994739660d95086/5fb2b678e9947320e3d950dc_web-clip.png",
+      "page": "https://www.mavenclinic.com/",
+      "sha256": "263b6acbed1d7108affea40275751186fccff8a220c798f3368ec436a19bbb8a"
+    },
+    {
+      "company": "Mercor",
+      "file": "mercor.png",
+      "source": "https://www.mercor.com/favicon.png",
+      "page": "https://www.mercor.com/",
+      "sha256": "ab181220884c22b1dbc392cee061561575f470d5e5de0970e25cf7b34557962c"
+    },
+    {
+      "company": "Meshy",
+      "file": "meshy.png",
+      "source": "https://www.meshy.ai/icon1.png?icon1.096grnl0ekqcw.png",
+      "page": "https://www.meshy.ai/",
+      "sha256": "f64c751460b79495063f38c6a5d109de1a6fbab7ae73d8ab5ec736b9a88babaf"
+    },
+    {
+      "company": "Mistral AI",
+      "file": "mistral-ai.ico",
+      "source": "https://mistral.ai/favicon.ico",
+      "page": "https://mistral.ai/",
+      "sha256": "320ccbbf53158067d4c84637dbfe52de7616d3c181c91198fae75eb1bc5f0c71"
+    },
+    {
+      "company": "MongoDB",
+      "file": "mongodb.ico",
+      "source": "https://www.mongodb.com/favicon.ico",
+      "page": "https://www.mongodb.com/",
+      "sha256": "1143ff8a5619ad9d016e3d94462f44ae9047ab4ac4c39722d265c88961591a1a"
+    },
+    {
+      "company": "Motional",
+      "file": "motional.ico",
+      "source": "https://motional.com/themes/custom/motional/favicon.ico",
+      "page": "https://motional.com/",
+      "sha256": "f7e7cf86c7ce1700ddb17d202645df2c237120a2a95d52df9ff393a123b3147f"
+    },
+    {
+      "company": "Nextdoor",
+      "file": "nextdoor.png",
+      "source": "https://about.nextdoor.com/hubfs/logo-nextdoor-favicon.png",
+      "page": "https://about.nextdoor.com/",
+      "sha256": "b899c9b9635134b12f330116f59a0a81f00404e6f8363180050348ef641a6dd3"
+    },
+    {
+      "company": "Nexthop AI",
+      "file": "nexthop-ai.png",
+      "source": "https://nexthop.ai/wp-content/uploads/2025/12/cropped-logo-with-icon-linkedin-400x400.png",
+      "page": "https://nexthop.ai/",
+      "observed_at": "2026-11-15",
+      "sha256": "1f8c300ea046f1fb6b6725c2a8fa8ba52f4b21e7de7d5879b1486d0f4423e044"
+    },
+    {
+      "company": "Nooks",
+      "file": "nooks.png",
+      "source": "https://cdn.prod.website-files.com/697107c16c913fd77cf0aacd/6aa8897c9f6a1c345f27a8f6_Avatar_400x400px.png",
+      "page": "https://www.nooks.ai/",
+      "sha256": "dff81461342ac8fe053155ae305fa2ad028121a851877150d55d50dc9acc8dfd"
+    },
+    {
+      "company": "Nscale",
+      "file": "nscale.png",
+      "source": "https://cdn.prod.website-files.com/69e759200831878be71184d8/6a7acbc1616a2b6fef2aa7ab_66851aef2492ff79aa3bd859_favicon-32.png",
+      "page": "https://www.nscale.com/",
+      "sha256": "94d8ead7e794b3168741474601fb9ebc97cf653350aad21ee446fbc435b52bc8"
+    },
+    {
+      "company": "Nubank",
+      "file": "nubank.ico",
+      "source": "https://nu.com/favicon.ico",
+      "page": "https://nu.com/us/en",
+      "sha256": "7f3f2dca283160ae4b9d21e27e9ce1b25f5e569d0ba32db0cca5f00aebe88a6b"
+    },
+    {
+      "company": "Nuro",
+      "file": "nuro.png",
+      "source": "https://www.nuro.ai/_nuxt/icons/icon_512x512.bccc78.png",
+      "page": "https://www.nuro.ai/",
+      "sha256": "9eb4c2cc8cafe8043d0fcb870bff957266372f2350a77a53206c02c367e2b322"
+    },
+    {
+      "company": "OKX",
+      "file": "okx.png",
+      "source": "https://www.okx.com/cdn/assets/imgs/253/59830BB78B18A776.png",
+      "page": "https://www.okx.com/en-us",
+      "sha256": "2c13b2131e9568bf6946cf6e980440040a3dd09ec5a4ca750b7ec1c2310a7903"
+    },
+    {
+      "company": "Ode",
+      "file": "ode.png",
+      "source": "https://cdn.prod.website-files.com/6a3426a0a0aec1b51be8611b/6a44e72437f7ee43871634b0_webclip.jpg",
+      "page": "https://www.ode.com/",
+      "sha256": "fd263d6e7e8e552b96e5e9f6b215acab48e3fdaa0c5518483ccc608eeeeca4e6"
+    },
+    {
+      "company": "Okta",
+      "file": "okta.ico",
+      "source": "https://www.okta.com/favicon.ico",
+      "page": "https://www.okta.com/",
+      "sha256": "d0a61e2ff899d83cbb25e25f4de53e077c21a251e4da1c45e49eb86e9881066b"
+    },
+    {
+      "company": "OnePay",
+      "file": "onepay.png",
+      "source": "https://www.onepay.com/icons/apple-icon-60x60.png",
+      "page": "https://www.onepay.com/",
+      "sha256": "afa5007e140d5c0cfcc573f0f8b9de8e41da011dd57a25346de37f07c76f52f9"
+    },
+    {
+      "company": "OpenAI",
+      "file": "openai.ico",
+      "source": "https://cdn.oaistatic.com/assets/favicon-miwirzcw.ico",
+      "page": "https://openai.com/",
+      "sha256": "b3cc4a8e4c1d4890d93c549f8349b0abca4732535d8e465a65499d302f28e63f"
+    },
+    {
+      "company": "OpenMind",
+      "file": "openmind.png",
+      "source": "https://openmind.com/apple-touch-icon.png",
+      "page": "https://openmind.com/",
+      "sha256": "ed285fbccaf008374a3b79df6bf744fc79efd94a2d81b310d40b3cc885ff6c6f"
+    },
+    {
+      "company": "Otter.ai",
+      "file": "otter-ai.png",
+      "source": "https://cdn.prod.website-files.com/618e9316785b3582a5178502/618e943a80919a98b5e9bf69_apple-icon.png",
+      "page": "https://otter.ai/",
+      "sha256": "c3c1e1bd914136b91d541da523a65b0ae02bfe4602530356b5187f1139adacae"
+    },
+    {
+      "company": "Palantir",
+      "file": "palantir.ico",
+      "source": "https://www.palantir.com/favicon.ico",
+      "page": "https://www.palantir.com/",
+      "sha256": "bcb8975e6e37afaa6695c39e21b3dd45be205635d1e183ebc4c511f437d9fc71"
+    },
+    {
+      "company": "Perplexity",
+      "file": "perplexity.png",
+      "source": "https://www.perplexity.ai/apple-touch-icon.png",
+      "page": "https://www.perplexity.ai/",
+      "sha256": "52ec4e92be76dca926f4b3a08babf537f9130edbf58d142fc16aebd3d7fbe6f3"
+    },
+    {
+      "company": "Pinterest",
+      "file": "pinterest.ico",
+      "source": "https://www.pinterestcareers.com/favicon.ico",
+      "page": "https://www.pinterestcareers.com/",
+      "sha256": "a68b12e59052637cb6e16324afc2fe611af6f91d69a7b91ccff79b12f80dec54"
+    },
+    {
+      "company": "Plaid",
+      "file": "plaid.png",
+      "source": "https://plaid.com/assets/img/favicons/apple-touch-icon.png",
+      "page": "https://plaid.com/",
+      "sha256": "f9a98e98c41212eb89e1d92e9f2318349570001e497e1fb1cc32bc39eb2f1016"
+    },
+    {
+      "company": "PlusAI",
+      "file": "plusai.ico",
+      "source": "https://www.plus.ai/favicon.ico",
+      "page": "https://www.plus.ai/",
+      "sha256": "1b3b263bfd55798745ed4a6f94e7f0fd80e76057b5fd023bef5f77112fab3264"
+    },
+    {
+      "company": "Profound",
+      "file": "profound.png",
+      "source": "https://static.tryprofound.com/favicons/v1/production/apple-touch-icon.png",
+      "page": "https://www.tryprofound.com/",
+      "sha256": "91d3450857eaf0181ab37127126dadd5d8e233204de33726d362e4a2944a3b83"
+    },
+    {
+      "company": "Quora",
+      "file": "quora.ico",
+      "source": "https://www.quora.com/favicon.ico",
+      "page": "https://www.quora.com/",
+      "sha256": "71b9be27b9a71e03736b8c3f55ae5eca53e022151e3e86b508495d28137b8611"
+    },
+    {
+      "company": "Recursive Superintelligence",
+      "file": "recursive-superintelligence.png",
+      "source": "https://framerusercontent.com/images/bYF8NqVlBBdIoQc0PwLZFokYcmc.png",
+      "page": "https://recursive.com/",
+      "sha256": "67c1de28a235a00482cfc7bb3a5e7161f107c5b156888b20c457e0cb2042e55e"
+    },
+    {
+      "company": "Reddit",
+      "file": "reddit.png",
+      "source": "https://redditinc.com/hubfs/Reddit_Favicon_FullColor_48x48.png",
+      "page": "https://redditinc.com/",
+      "sha256": "3a2e7c56ac46baa4d15b3f5666f834e3b31631e93cd900269145abb8895643b1"
+    },
+    {
+      "company": "Reflection AI",
+      "file": "reflection-ai.png",
+      "source": "https://reflection.ai/apple-icon.png?apple-icon.0vcqbysj-h0zk.png",
+      "page": "https://reflection.ai/",
+      "sha256": "5856ef9911ffa620756ea2aabb71194e72e928dd9539dd99fc8e1b610ec4c475"
+    },
+    {
+      "company": "Replit",
+      "file": "replit.png",
+      "source": "https://replit.com/public/icons/favicon-prompt-192-rebrand.png",
+      "page": "https://replit.com/",
+      "sha256": "cbd9fa5be81f1b59919c3ac2a43a6c0b98dc7c873b325a526df214e9ef7afea4"
+    },
+    {
+      "company": "Retell AI",
+      "file": "retell-ai.png",
+      "source": "https://cdn.prod.website-files.com/64ada0f2685b2d18caa5e699/69d7b35ce160f153aa823cf0_output-Retellai%20(2).png",
+      "page": "https://www.retellai.com/",
+      "sha256": "291ccec82ad381d6316efaf9bb5331e386c00c3cb2d2e5697495eb4c8b98c145"
+    },
+    {
+      "company": "Robinhood",
+      "file": "robinhood.jpg",
+      "source": "https://v.fastcdn.co/u/62ba1c13/65631118-0-RH-Favicon---Neon.jpg",
+      "page": "https://careers.robinhood.com/",
+      "sha256": "42dd5d98c18f84a765d60ccad725009de4d0c66a0e7d3ed4c695b26ccb3f039c"
+    },
+    {
+      "company": "Roblox",
+      "file": "roblox.png",
+      "source": "https://careers.roblox.com/icons/apple-icon.png",
+      "page": "https://careers.roblox.com/",
+      "sha256": "eab195079951df339a1217387868fc7d98c09dce588cf7aeab3f8843081612d5"
+    },
+    {
+      "company": "Roku",
+      "file": "roku.ico",
+      "source": "https://www.weareroku.com/favicon.ico",
+      "page": "https://www.weareroku.com/",
+      "sha256": "e9643ce1c5e89dca3ed9254eb632e0c2ecf0001f49f1fd5ac8fb7113c75dee79"
+    },
+    {
+      "company": "SambaNova",
+      "file": "sambanova.png",
+      "source": "https://sambanova.ai/hubfs/sambanova-favicon.png",
+      "page": "https://sambanova.ai/",
+      "sha256": "2621eabab0945bc71c1cb51ba034e2350ed19ac6fee2beaae88bdcf1cd1c4c84"
+    },
+    {
+      "company": "Scale AI",
+      "file": "scale-ai.png",
+      "source": "https://scale.com/static/global/favicon/v3/apple-touch-icon.png",
+      "page": "https://scale.com/",
+      "sha256": "3aee2b1d959a47e2fca59407a1c821fe89fa2a9eb3b49b510142498d9d2290c0"
+    },
+    {
+      "company": "Sierra",
+      "file": "sierra.png",
+      "source": "https://sierra.ai/icon.png",
+      "page": "https://sierra.ai/",
+      "sha256": "e91c953ec269e82801c02373fe93bb156cb0a1ad79257ccd3766dffe21af00a9"
+    },
+    {
+      "company": "Sigma Computing",
+      "file": "sigma-computing.png",
+      "source": "https://www.sigmacomputing.com/sigma-favicon.png",
+      "page": "https://www.sigmacomputing.com/",
+      "sha256": "62a6fd7d320451279f26f0353d635d9baa12acffdf3938316997f5cf554f7036"
+    },
+    {
+      "company": "Snorkel AI",
+      "file": "snorkel-ai.png",
+      "source": "https://s46486.pcdn.co/wp-content/uploads/2022/11/android-chrome-192x192-1-100x100.png",
+      "page": "https://snorkel.ai/",
+      "sha256": "6c7a5b23f3c0b797f21259a238e0fec97d0972db913fbc79cee9990f2a96e15d"
+    },
+    {
+      "company": "Snowflake",
+      "file": "snowflake.png",
+      "source": "https://docs.snowflake.com/images/favicon/apple-touch-icon.png",
+      "page": "https://docs.snowflake.com/en/",
+      "sha256": "768a62b39de7ea124f1009939c0b846d6df919f543d80e4a052cca5dec56bf3d",
+      "observed_at": "2026-11-14",
+      "note": "Replaced an incorrect careers-site favicon with the Snowflake icon linked by the official documentation site."
+    },
+    {
+      "company": "SpaceX",
+      "file": "spacex.ico",
+      "source": "https://www.spacex.com/assets/favicon-spacex.ico",
+      "page": "https://www.spacex.com/",
+      "sha256": "1b17fd7c26fe326bf178cbf266a4dd2e2f5483d758873611abf5c4bb17e503e0"
+    },
+    {
+      "company": "SpaceXSI (xAI)",
+      "file": "spacexsi-xai.ico",
+      "source": "https://x.ai/favicon.ico",
+      "page": "https://x.ai/",
+      "sha256": "05156a916d1b695e952b63a6196d8d481562bcb0180454311a861ba214e753d9"
+    },
+    {
+      "company": "Spotify",
+      "file": "spotify.png",
+      "source": "https://open.spotifycdn.com/cdn/images/favicon32.b64ecc03.png",
+      "page": "https://www.spotify.com/",
+      "sha256": "b64ecc030dcc47688f94d6c4b14d747f2b8dbcdc7012e5c69574f8354eac7257"
+    },
+    {
+      "company": "Stripe",
+      "file": "stripe.ico",
+      "source": "https://stripe.com/favicon.ico",
+      "page": "https://stripe.com/",
+      "sha256": "50630726cbd85299c64dbb510f051e5d70013abcd620fa2b23be82e618140150"
+    },
+    {
+      "company": "StubHub",
+      "file": "stubhub.ico",
+      "source": "https://www.stubhub.com/favicon.ico",
+      "page": "https://www.stubhub.com/",
+      "sha256": "0ed0ff1767261b7067e1595cbe3fe9785488a4e78d9ed5a5257a383e79a0cc8a"
+    },
+    {
+      "company": "Suno",
+      "file": "suno.ico",
+      "source": "https://suno.com/favicon.ico",
+      "page": "https://suno.com/",
+      "sha256": "5e1269001db1144a55392f8a2805d4c3098d0d7f19a31ad0105040c87c390509"
+    },
+    {
+      "company": "TabaPay",
+      "file": "tabapay.svg",
+      "source": "https://cdn.prod.website-files.com/69d506915e199fb590336928/69efd4dd32c3c543d5ab0c85_Website.svg",
+      "page": "https://tabapay.com/",
+      "sha256": "29b5ca2b7351fb581d28e4f29847bf25251a80766d171c408d31b1041e460884"
+    },
+    {
+      "company": "Temporal",
+      "file": "temporal.png",
+      "source": "https://temporal.io/apple-touch-icon.png",
+      "page": "https://temporal.io/",
+      "sha256": "ff5de513673bf5cae99e336b18d6910abe24ddf1b04b43bbdbf87f845d09a05a"
+    },
+    {
+      "company": "Thinking Machines Lab",
+      "file": "thinking-machines-lab.png",
+      "source": "https://thinkingmachines.ai/images/apple-touch-icon.png",
+      "page": "https://thinkingmachines.ai/",
+      "sha256": "ef907e01669290064ce1db3d7902203fb2786dc110d2c496a8a02ad912d32e7e"
+    },
+    {
+      "company": "Together AI",
+      "file": "together-ai.png",
+      "source": "https://cdn.prod.website-files.com/69654e88dce9154b5f1206dd/69a59cff65ed0f267dd2fbe8_touchicon.png",
+      "page": "https://www.together.ai/",
+      "sha256": "b4755d2c1d2ac7c67ff2002ae2d237db5a9c6c592606d64625991e5a7cf8568f"
+    },
+    {
+      "company": "Tubi",
+      "file": "tubi.png",
+      "source": "https://corporate.tubitv.com/wp-content/uploads/2024/03/favicon.png",
+      "page": "https://corporate.tubitv.com/",
+      "sha256": "490f6af5812e1ef2c0ec82d691bfea5561d63c82bf8939beed798813855ba1b6"
+    },
+    {
+      "company": "Twilio",
+      "file": "twilio.png",
+      "source": "https://static.vscdn.net/images/careers/demo/twilio/1727195002::Twilio+Favicon",
+      "page": "https://jobs.twilio.com/careers",
+      "sha256": "d30e8af2adc987835346f3578480d33dae14aba2eefa101622e51b8e2bdf4d27"
+    },
+    {
+      "company": "TypeSafe AI",
+      "file": "typesafe-ai.png",
+      "source": "https://framerusercontent.com/images/kcuF2BEp5XaVfkmFB634IPRKQH0.png",
+      "page": "https://typesafe.ai/",
+      "sha256": "7d09b5ea66393d036f39d2a2533bc8d8214717f18cb025fd67f7fdb0e9df07bb"
+    },
+    {
+      "company": "Upstart",
+      "file": "upstart.png",
+      "source": "https://d25wby5c7p9100.cloudfront.net/public/uploads/e501e31218e51f39879b9ad8bc1720d8/companies/favicons/e501e31218e51f39879b9ad8bc1720d8/basic/logo-square.png?1713448424",
+      "page": "https://careers.upstart.com/home",
+      "sha256": "3270383314a92d8828967b82bcf98585453c4cb5f62780d99defdb8fc19b1c9d"
+    },
+    {
+      "company": "Valon",
+      "file": "valon.png",
+      "source": "https://www.valon.ai/apple-touch-icon.png",
+      "page": "https://www.valon.ai/",
+      "sha256": "bb248922ae958a726fcec2425c23d27e9037b7a6d77f53a0b4bc650fa40bc998"
+    },
+    {
+      "company": "Vercel",
+      "file": "vercel.png",
+      "source": "https://assets.vercel.com/image/upload/q_auto/front/favicon/vercel/apple-touch-icon-57x57.png",
+      "page": "https://vercel.com/",
+      "sha256": "00da22bd9619febf05bb8326b97c58a2ddcdeb50d1f3d5fdf344c075d06ac1f4"
+    },
+    {
+      "company": "Verkada",
+      "file": "verkada.png",
+      "source": "https://www.verkada.com/apple-icon.png?apple-icon.0ndfu63g65zkm.png",
+      "page": "https://www.verkada.com/",
+      "sha256": "829a3aebe6db529b7413b247c21321895cea39e4d23b11904bb0769ad6e9c4c7"
+    },
+    {
+      "company": "Waymo",
+      "file": "waymo.png",
+      "source": "https://d25wby5c7p9100.cloudfront.net/public/uploads/7aa1560c45e6a24542622ddbbcda96ee/companies/favicons/7aa1560c45e6a24542622ddbbcda96ee/basic/favicon.png?1705403769",
+      "page": "https://careers.withwaymo.com/",
+      "sha256": "46e4fc0c7a65dcffa45307886a5f18d7d0b394f7fa00474ef941ef45dce8548e"
+    },
+    {
+      "company": "Wisdom",
+      "file": "wisdom.png",
+      "source": "https://framerusercontent.com/images/X2EvyWvLkV4ZHAeYYLX5EFCdveM.png",
+      "page": "https://www.wisdom.ai/",
+      "sha256": "c8f21ff268119c24132def539ae883e1af3f312d561ddf612e2bf1da2f5f4bdc"
+    },
+    {
+      "company": "Workday",
+      "file": "workday.ico",
+      "source": "https://www.workday.com/favicon.ico",
+      "page": "https://www.workday.com/",
+      "sha256": "191c6208283772cc7287e4b6ecc19b06bce92b0963bf3c763245d4bd267d02eb"
+    },
+    {
+      "company": "XPENG",
+      "file": "xpeng.svg",
+      "source": "https://a-cdn.xpeng.com/mall/public/favicon.svg",
+      "page": "https://www.xpeng.com/",
+      "sha256": "d9f40b6ca8b2c8f357323e8931b5a7fc30b4c5d1fa833f8e11d7b21157dbae25"
+    },
+    {
+      "company": "Zip",
+      "file": "zip.png",
+      "source": "https://cdn.prod.website-files.com/66ba279e03c8e2713df59ea5/66ebfae127f34d94eaeb3c38_Zip%20Webclip%20256%20x%20256.png",
+      "page": "https://zip.com/",
+      "sha256": "1c09d5e8cd4f57a7b67f560a834ec6e56944fa717957d80648ec53b616203e1c"
+    },
+    {
+      "company": "Zoox",
+      "file": "zoox.png",
+      "source": "https://zoox.com/common/favicons/apple-touch-icon.png",
+      "page": "https://zoox.com/",
+      "sha256": "2d02a60c0ce0c4f7e09e0dc8f10e5498a771bcae21894be2fbe4abfb43cd5f69"
+    },
+    {
+      "company": "fal",
+      "file": "fal.png",
+      "source": "https://cdn.prod.website-files.com/6a72ef21c470312422dea9b3/6adae13a030770b54ecc8783_fal-icon-favicon.png",
+      "page": "https://fal.ai/",
+      "sha256": "3f9867ae04060e02e05ee86447693702aae87dc68354cd664d3ecea44ff4097f"
+    }
+  ]
+}

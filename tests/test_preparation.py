@@ -194,6 +194,179 @@ class PreparationTests(unittest.TestCase):
         result = self.plan(research=lambda *_: {"text": "Unsupported claim", "sources": [], "mode": "model"})
         self.assertIn("Unverified research (no citations returned)", result["markdown"])
 
+    def test_agent_harness_round_prioritizes_original_runnable_exercises(self):
+        interview = {**self.interviews[0], "round": "Build an agent harness"}
+        result = self.plan(interviews=[interview])
+        today = [t for t in result["tasks"] if t["due_date"] == "2026-10-28"]
+        self.assertTrue(any(t["practice_key"] == "harness_loop" for t in today))
+        harness = [t for t in result["tasks"] if t["practice_key"].startswith("harness_")]
+        self.assertTrue(harness)
+        self.assertTrue(all("not an actual reported company question" in t["notes"] for t in harness))
+        for topic in ("schema", "timeout", "evaluat", "trace", "permission"):
+            self.assertIn(topic, str(harness).lower())
+        self.assert_budget(result["tasks"])
+
+    def test_agent_role_title_also_selects_harness_exercises(self):
+        app = {**self.apps[0], "title": "Senior Engineer, Agent Runtime"}
+        result = self.plan(applications=[app])
+        self.assertTrue(any(t["practice_key"] == "harness_loop" for t in result["tasks"]))
+
+    def test_recorded_interview_title_works_without_application_record(self):
+        interview = {**self.interviews[0], "title": "Agent Harness Engineer"}
+        result = self.plan(applications=[], interviews=[interview])
+        self.assertTrue(any(t["practice_key"] == "harness_loop" for t in result["tasks"]))
+
+    def test_general_daily_goals_balance_three_tracks_and_are_idempotent(self):
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        first = self.plan(applications=[], interviews=[], config=config)["tasks"]
+        by_day = defaultdict(list)
+        for task in first:
+            by_day[task["due_date"]].append(task)
+        self.assertEqual(len(by_day), 14)
+        for tasks in by_day.values():
+            self.assertEqual({t["category"] for t in tasks}, {"learning", "coding", "system_design"})
+            self.assertEqual(sum(t["minutes"] for t in tasks), 90)
+        second = self.plan(applications=[], interviews=[], config=config, existing_tasks=first)["tasks"]
+        self.assertEqual(first, second)
+
+    def test_daily_goals_preserve_manual_work_and_report_capacity_shortfalls(self):
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        custom = {"id": "manual", "due_date": "2026-10-28", "title": "My interview notes",
+                  "minutes": 75, "status": "doing", "notes": "My edits", "category": "custom",
+                  "company": "Personal", "source_url": ""}
+        result = self.plan(applications=[], interviews=[], config=config, existing_tasks=[custom])
+        self.assertEqual(next(t for t in result["tasks"] if t["id"] == "manual"), custom)
+        self.assertIn("does not fit on 2026-10-28", result["markdown"])
+        self.assert_budget(result["tasks"])
+
+    def test_unfinished_daily_habits_do_not_compound_the_next_day(self):
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        first = self.plan(applications=[], interviews=[], config=config)["tasks"]
+        first[0].update(status="done", notes="Keep my progress", actual_minutes=25,
+                        completed_at="2026-10-28T18:00:00-07:00")
+        completed = copy.deepcopy(first[0])
+        result = self.plan(applications=[], interviews=[], config=config, existing_tasks=first,
+                           today="2026-10-29")["tasks"]
+        self.assertEqual(next(t for t in result if t["id"] == completed["id"]), completed)
+        missed = [t for t in result if t.get("original_due_date") == "2026-10-28"]
+        self.assertEqual(len(missed), 2)
+        self.assertTrue(all(t["status"] == "unscheduled" for t in missed))
+        today = [t for t in result if t["due_date"] == "2026-10-29"]
+        self.assertEqual({t["category"] for t in today}, {"learning", "coding", "system_design"})
+        self.assert_budget(result)
+
+    def test_daily_goals_do_not_replace_deadline_specific_preparation(self):
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        result = self.plan(config=config)
+        self.assertTrue(all(t.get("interview_id") == "interview-1" for t in result["tasks"]))
+        self.assertFalse(any(t["practice_key"].startswith("daily:") for t in result["tasks"]))
+        self.assert_budget(result["tasks"])
+
+    def test_undated_applications_use_daily_habits_and_keep_company_research(self):
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        result = self.plan(interviews=[], config=config)
+        self.assertTrue(all(t["practice_key"].startswith("daily:") for t in result["tasks"]))
+        self.assertIn("https://openai.com/interview-guide/", result["markdown"])
+        self.assert_budget(result["tasks"])
+
+    def test_explicit_rebalance_backlogs_old_generated_work_without_losing_edits(self):
+        old = self.plan(interviews=[])["tasks"]
+        old[0].update(title="My edited title", notes="My exact notes", confidence=3,
+                      source_url="https://example.org/user-source")
+        snapshot = copy.deepcopy(old)
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        result = self.plan(interviews=[], config=config, existing_tasks=old, rebalance_daily=True)
+        result_by_id = {t["id"]: t for t in result["tasks"]}
+        for task in old:
+            retained = result_by_id[task["id"]]
+            self.assertEqual(retained["status"], "unscheduled")
+            self.assertTrue(retained["daily_routine_backlog"])
+            self.assertEqual(retained["original_due_date"], task["due_date"])
+            for field in ("title", "notes", "minutes", "source_url"):
+                self.assertEqual(retained[field], task[field])
+        self.assertEqual(old, snapshot)
+        today = [t for t in result["tasks"] if t["due_date"] == "2026-10-28"]
+        self.assertEqual({t["category"] for t in today}, {"learning", "coding", "system_design"})
+        ordinary = self.plan(interviews=[], config=config, existing_tasks=result["tasks"])
+        self.assertEqual(result["tasks"], ordinary["tasks"])
+        twice = self.plan(interviews=[], config=config, existing_tasks=result["tasks"], rebalance_daily=True)
+        self.assertEqual(result["tasks"], twice["tasks"])
+        self.assert_budget(result["tasks"])
+
+    def test_rebalance_preserves_manual_in_progress_and_completed_tasks(self):
+        old = self.plan(interviews=[])["tasks"]
+        old[0].update(status="done", minutes=10, notes="Completed notes",
+                      completed_at="2026-10-28T08:00:00-07:00", actual_minutes=12)
+        old[1].update(status="doing", minutes=20, notes="Current work")
+        old[2].update(status="skipped", notes="Skipped deliberately")
+        custom = {"id": "manual", "due_date": "2026-10-28", "title": "Own commitment",
+                  "minutes": 30, "status": "todo", "notes": "Keep exactly", "category": "custom",
+                  "company": "Personal", "source_url": ""}
+        existing = old + [custom]
+        protected = copy.deepcopy(old[:3] + [custom])
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        result = self.plan(interviews=[], config=config, existing_tasks=existing, rebalance_daily=True)
+        result_by_id = {t["id"]: t for t in result["tasks"]}
+        for task in protected:
+            self.assertEqual(result_by_id[task["id"]], task)
+        self.assert_budget(result["tasks"])
+        self.assertIn("does not fit on 2026-10-28", result["markdown"])
+
+    def test_rebalance_does_not_backlog_upcoming_interview_curriculum(self):
+        old = self.plan()["tasks"]
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        result = self.plan(config=config, existing_tasks=old, rebalance_daily=True)
+        self.assertEqual(result["tasks"], old)
+        self.assertIn("upcoming interview takes priority", result["markdown"])
+
+    def test_previous_day_habit_in_progress_keeps_doing_status_and_reserves_capacity(self):
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        old = self.plan(applications=[], interviews=[], config=config)["tasks"]
+        ongoing = next(t for t in old if t["due_date"] == "2026-10-28" and t["category"] == "learning")
+        ongoing.update(status="doing", notes="Keep my ongoing learning work")
+        old_id = ongoing["id"]
+        result = self.plan(applications=[], interviews=[], config=config, existing_tasks=old,
+                           today="2026-10-29", rebalance_daily=True)
+        retained = next(t for t in result["tasks"] if t["id"] == old_id)
+        self.assertEqual(retained["status"], "doing")
+        self.assertEqual(retained["due_date"], "2026-10-29")
+        self.assertEqual(retained["original_due_date"], "2026-10-28")
+        self.assertEqual(retained["notes"], "Keep my ongoing learning work")
+        self.assertNotIn("daily_routine_backlog", retained)
+        self.assert_budget(result["tasks"])
+
+    def test_inactive_interview_statuses_do_not_block_daily_routine(self):
+        config = copy.deepcopy(self.config)
+        config["daily_goals"] = {"learning_minutes": 30, "coding_minutes": 30,
+                                 "system_design_minutes": 30}
+        for status in ("cancelled", "canceled", "completed"):
+            with self.subTest(status=status):
+                interview = {**self.interviews[0], "status": status}
+                result = self.plan(config=config, interviews=[interview], rebalance_daily=True)
+                self.assertTrue(result["tasks"])
+                self.assertTrue(all(t["practice_key"].startswith("daily:") for t in result["tasks"]))
+                self.assertFalse(any(t.get("interview_id") == interview["id"] for t in result["tasks"]))
+                self.assertNotIn("upcoming interview takes priority", result["markdown"])
+                self.assert_budget(result["tasks"])
+
 
 if __name__ == "__main__":
     unittest.main()

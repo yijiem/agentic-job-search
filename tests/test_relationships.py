@@ -68,6 +68,29 @@ class RelationshipPacketTests(unittest.TestCase):
         self.assertEqual("unknown", lead["relationship"])
         self.assertEqual("", lead["via"])
 
+    def test_account_observation_keeps_named_paths_and_provenance(self):
+        contact = self.contact(
+            relationship="mutual", relationship_source="linkedin_signed_in_observation",
+            observed_at="2026-11-14", related_job_ids=["job-123"],
+            mutual_connections=[{"name": "Alex", "profile_url": "https://example.org/alex"},
+                                {"name": "Sam", "profile_url": "javascript:alert(1)"}],
+            title="Engineering Manager")
+        lead = build_packet(self.job, self.profile, [contact])["contacts"][0]
+        self.assertEqual("LinkedIn-observed mutual connection via Alex, Sam", lead["relationship_label"])
+        self.assertIn("signed-in account", lead["relationship_basis"])
+        self.assertEqual("2026-11-14", lead["source_date"])
+        self.assertEqual(["job-123"], lead["related_job_ids"])
+        self.assertEqual("", lead["mutual_connections"][1]["profile_url"])
+        self.assertFalse(lead["hiring_manager_for_role"])
+
+    def test_degree_without_a_recorded_relationship_does_not_create_a_path(self):
+        contact = self.contact(connection_degree=2,
+                               relationship_source="linkedin_signed_in_observation")
+        lead = build_packet(self.job, self.profile, [contact])["contacts"][0]
+        self.assertEqual("public", lead["relationship"])
+        self.assertEqual([], lead["mutual_connections"])
+        self.assertEqual("", lead["via"])
+
     def test_unsourced_and_wrong_company_contacts_are_excluded(self):
         contacts = [self.contact("unsourced", profile_url="", evidence_url=""),
                     self.contact("wrong", company="Example AI Ventures"),

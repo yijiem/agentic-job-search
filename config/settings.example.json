@@ -38,6 +38,14 @@
     "max_output_tokens": 5000,
     "model_env": "OPENAI_MODEL"
   },
+  "daily_goals": {
+    "enabled": false,
+    "applications": 10,
+    "learning_minutes": 30,
+    "coding_minutes": 30,
+    "system_design_minutes": 30,
+    "application_minutes_each": 15
+  },
   "discovery": {
     "auto_subscribe": false,
     "max_candidates": 5

@@ -76,8 +76,16 @@ class SourceTests(unittest.TestCase):
             request.assert_not_called()
 
     def test_invalid_board_token(self):
-        with self.assertRaises(SourceError):
-            fetch_source(dict(self.source(), board="https://private.test"))
+        for board in ("https://private.test", "../acme", "..", "acme/jobs", "acme?query=x"):
+            with self.subTest(board=board), self.assertRaises(SourceError):
+                fetch_source(dict(self.source(), board=board))
+
+    def test_dotted_ashby_board_token(self):
+        with patch("jobflow.sources._request_json", return_value={"jobs": [self.ashby_job()]}) as request:
+            jobs = fetch_source(dict(self.source("ashby"), board="far.ai"))
+        self.assertEqual(len(jobs), 1)
+        request.assert_called_once_with(
+            "https://api.ashbyhq.com/posting-api/job-board/far.ai?includeCompensation=true")
 
     def test_ashby_hybrid_is_not_remote_and_keeps_secondary_locations(self):
         job = self.fetch({"jobs": [self.ashby_job()]}, "ashby")[0]
@@ -139,6 +147,29 @@ class SourceTests(unittest.TestCase):
             with self.assertRaises(SourceError):
                 _request_json("https://a.test")
             self.assertEqual(request.call_count, 1)
+
+    def test_response_at_size_limit_is_accepted(self):
+        payload = b'{"jobs": []}'
+        with patch("jobflow.sources.MAX_RESPONSE_BYTES", len(payload)), \
+                patch("jobflow.sources.urlopen", return_value=io.BytesIO(payload)):
+            self.assertEqual(_request_json("https://a.test"), {"jobs": []})
+
+    def test_oversized_response_is_bounded_and_not_retried(self):
+        class RecordingResponse(io.BytesIO):
+            def read(self, size=-1):
+                self.requested_size = size
+                return super().read(size)
+
+        limit = 1024 * 1024
+        response = RecordingResponse(b' ' * (limit + 100))
+        with patch("jobflow.sources.MAX_RESPONSE_BYTES", limit), \
+                patch("jobflow.sources.urlopen", return_value=response) as request, \
+                patch("jobflow.sources.time.sleep") as sleep:
+            with self.assertRaisesRegex(SourceError, "exceeds the 1 MiB limit"):
+                _request_json("https://a.test")
+        self.assertEqual(response.requested_size, limit + 1)
+        request.assert_called_once()
+        sleep.assert_not_called()
 
     def test_auth_block_not_retried(self):
         with patch("jobflow.sources.urlopen", side_effect=HTTPError("https://a.test", 403, "Forbidden", {}, None)) as request:
