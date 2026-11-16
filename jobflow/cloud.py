@@ -528,12 +528,18 @@ class CloudHandler(JobflowHandler):
 
     def _complete_signin(self, identity):
         account = self.server.accounts.authenticate_identity(identity['id'], identity['email'])
-        root = self._root(account)
-        with execution_context(root, seconds=INTERACTIVE_LEASE_SECONDS):
-            hydrate_workspace(root)
-            initialize_workspace(root, sources=self.server.sources)
-            from .reports import atomic_write
-            atomic_write(root / 'config/hosted.json', '{"version": 1}\n')
+        # Completed onboarding/adoption is durable account-registry state, not
+        # a disposable cache marker. Returning users need only authentication:
+        # workspace reads happen on the next request using an isolated cache.
+        # Taking the worker's lease here would consume a valid email link before
+        # a busy workspace could issue its session, including after cold starts.
+        if not account.get('onboarding_complete'):
+            root = self._root(account)
+            with execution_context(root, seconds=INTERACTIVE_LEASE_SECONDS):
+                hydrate_workspace(root)
+                initialize_workspace(root, sources=self.server.sources)
+                from .reports import atomic_write
+                atomic_write(root / 'config/hosted.json', '{"version": 1}\n')
         # Rotate any prior app session rather than retaining a fixed login token.
         unused, old_token = self._session(required=False)
         if old_token:
@@ -547,8 +553,8 @@ class CloudHandler(JobflowHandler):
         return account, csrf
 
     def _auth_callback(self):
-        pending = self.server.pending_signins.consume(self._cookie(self.server.pending_cookie_name))
         try:
+            pending = self.server.pending_signins.consume(self._cookie(self.server.pending_cookie_name))
             query = parse_qs(urlsplit(self.path).query, max_num_fields=8, keep_blank_values=True)
             codes = query.get('code', [])
             if (pending is None or len(codes) != 1 or 'error' in query or
@@ -562,7 +568,13 @@ class CloudHandler(JobflowHandler):
             if str(identity.get('email', '')).casefold() != email:
                 raise AuthError('The sign-in provider did not confirm this email address.')
             self._complete_signin(identity)
-        except (AuthError, ValueError, KeyError, TypeError, RemoteError):
+        except (RemoteError, WorkspaceBusyError, OSError, sqlite3.Error):
+            # A backend failure is not evidence that the email link was invalid.
+            # The one-use attempt may already be consumed; never replay it.
+            self._set_pending_cookie('', expire=True)
+            self._redirect('/account?signin=unavailable')
+            return
+        except (AuthError, ValueError, KeyError, TypeError):
             # Never echo provider error text, authorization codes, or email data.
             self._set_pending_cookie('', expire=True)
             self._redirect('/account?signin=retry')

@@ -207,8 +207,11 @@ async function initializeAccount() {
     if (account.authenticated) await acceptAccount(account);
     else {
       accountState.account = account;
-      if (new URLSearchParams(location.search).get('signin') === 'retry')
+      const signin = new URLSearchParams(location.search).get('signin');
+      if (signin === 'retry')
         accountState.error = 'This sign-in link could not be used. Request a new email here, then open its link in this same browser.';
+      else if (signin === 'unavailable')
+        accountState.error = 'Jobflow could not finish signing you in because a service was temporarily unavailable. Please wait a moment, then request a new sign-in email.';
       renderAccount();
     }
   } catch (error) {

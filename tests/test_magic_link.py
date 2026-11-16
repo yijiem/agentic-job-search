@@ -14,6 +14,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from jobflow.cloud import CloudServer
 from jobflow.cloud_auth import AuthError, AuthRateLimitError, PendingSignIns, SupabaseEmailAuth
+from jobflow.onboarding import initialize_workspace, save_onboarding
+from jobflow.remote import RemoteBusyError, RemoteError
 
 
 class PendingSignInTests(unittest.TestCase):
@@ -258,6 +260,121 @@ class MagicLinkHTTPTests(unittest.TestCase):
         self.assert_failed_link(self.request('GET', self.callback, cookie='__Host-jobflow-pkce=forged', headers=self.navigation))
         self.assertEqual(self.auth.exchanges, [])
         self.assertEqual(self.request('GET', self.callback, cookie=cookie, headers=self.navigation)[0], 200)
+
+    def test_completed_account_signs_in_without_workspace_access_and_rotates_session(self):
+        pending, unused, unused = self.start()
+        first = self.request('GET', self.callback, cookie=pending, headers=self.navigation)
+        self.assertEqual(first[0], 200)
+        old_cookie = self.session_cookie(first[1])
+        old_token = old_cookie.split('=', 1)[1]
+        account = self.server.accounts.lookup_email('owner@example.com')
+        root = self.server.accounts.workspace(account)
+        save_onboarding(root, {'profile': {'name': 'Owner', 'headline': 'Engineer',
+            'skills': ['Python'], 'evidence': [{'id': 'actual-work',
+                'text': 'Built an actual Python service.', 'tags': ['Python']}]}})
+        self.server.accounts.mark_onboarding_complete(account)
+        pending, unused, unused = self.start()
+        with patch.object(self.server.accounts, 'workspace',
+                          side_effect=RemoteBusyError('private workspace is busy')) as workspace, \
+                patch('jobflow.cloud.execution_context',
+                      side_effect=RemoteBusyError('background worker owns the lease')) as lease, \
+                patch('jobflow.cloud.initialize_workspace',
+                      side_effect=AssertionError('completed workspace must not be initialized')):
+            status, headers, body = self.request('GET', self.callback,
+                cookie=pending + '; ' + old_cookie, headers=self.navigation)
+        self.assertEqual(status, 200, body)
+        workspace.assert_not_called()
+        lease.assert_not_called()
+        new_cookie = self.session_cookie(headers)
+        self.assertNotEqual(new_cookie, old_cookie)
+        self.assertIsNone(self.server.accounts.session(old_token))
+        session = self.server.accounts.session(new_cookie.split('=', 1)[1])
+        self.assertEqual(session['account']['email'], 'owner@example.com')
+        self.assertTrue(session['account']['onboarding_complete'])
+        self.assertTrue(any('Max-Age=0' in value for value in headers['cookies']
+                            if value.startswith('__Host-jobflow-pkce=')))
+        self.assertEqual(len(self.server.pending_signins.entries), 0)
+        exchanges = len(self.auth.exchanges)
+        self.assert_failed_link(self.request('GET', self.callback, cookie=pending, headers=self.navigation))
+        self.assertEqual(len(self.auth.exchanges), exchanges)
+        self.assertIsNotNone(self.server.accounts.session(new_cookie.split('=', 1)[1]))
+
+    def test_adopted_owner_first_signin_does_not_open_or_reinitialize_workspace(self):
+        source = self.root / 'existing-owner-workspace'
+        initialize_workspace(source, sources=[])
+        save_onboarding(source, {'profile': {'name': 'Owner', 'headline': 'Engineer',
+            'skills': ['Python'], 'evidence': [{'id': 'actual-work',
+                'text': 'Built an actual Python service.', 'tags': ['Python']}]}})
+        self.server.accounts.adopt('owner@example.com', source)
+        self.assertEqual(self.server.accounts.lookup_email('owner@example.com')['status'], 'invited')
+        pending, unused, unused = self.start()
+        with patch.object(self.server.accounts, 'workspace',
+                          side_effect=RemoteError('private storage is unavailable')) as workspace, \
+                patch('jobflow.cloud.execution_context',
+                      side_effect=RemoteBusyError('background worker owns the lease')) as lease:
+            status, headers, body = self.request('GET', self.callback, cookie=pending, headers=self.navigation)
+        self.assertEqual(status, 200, body)
+        workspace.assert_not_called()
+        lease.assert_not_called()
+        session = self.server.accounts.session(self.session_cookie(headers).split('=', 1)[1])
+        self.assertEqual(session['account']['email'], 'owner@example.com')
+        self.assertTrue(session['account']['onboarding_complete'])
+        self.assertIsNotNone(session['account']['adopted_at'])
+
+    def test_new_and_incomplete_accounts_still_initialize_workspace(self):
+        for expected_status in ('invited', 'active'):
+            with self.subTest(previous_status=expected_status):
+                account = self.server.accounts.lookup_email('owner@example.com')
+                self.assertEqual(account['status'], expected_status)
+                self.assertFalse(account['onboarding_complete'])
+                pending, unused, unused = self.start()
+                with patch('jobflow.cloud.initialize_workspace', wraps=initialize_workspace) as initialize:
+                    status, headers, body = self.request('GET', self.callback,
+                        cookie=pending, headers=self.navigation)
+                self.assertEqual(status, 200, body)
+                initialize.assert_called_once()
+                root = self.server.accounts.workspace(account)
+                for name in ('profile.json', 'settings.json', 'hosted.json'):
+                    self.assertTrue((root / 'config' / name).is_file(), name)
+                state = self.request('GET', '/api/account', cookie=self.session_cookie(headers))[2]
+                self.assertTrue(state['authenticated'])
+                self.assertFalse(state['onboarding']['complete'])
+
+    def test_incomplete_workspace_contention_is_unavailable_without_a_session(self):
+        pending, unused, unused = self.start()
+        with patch('jobflow.cloud.execution_context') as lease:
+            lease.return_value.__enter__.side_effect = RemoteBusyError('private workspace lease detail')
+            status, headers, body = self.request('GET', self.callback, cookie=pending, headers=self.navigation)
+        self.assertEqual(status, 303, body)
+        self.assertEqual(headers['Location'], '/account?signin=unavailable')
+        self.assertFalse(any(value.startswith('__Host-jobflow=') for value in headers['cookies']))
+        self.assertNotIn('private workspace lease detail', str(body))
+        self.assertEqual(len(self.auth.exchanges), 1)
+        self.assertEqual(len(self.server.pending_signins.entries), 0)
+        with self.server.accounts._connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0], 0)
+        self.assert_failed_link(self.request('GET', self.callback, cookie=pending, headers=self.navigation))
+        self.assertEqual(len(self.auth.exchanges), 1)
+
+    def test_callback_storage_failures_do_not_claim_the_email_link_is_invalid(self):
+        operations = ((self.server.pending_signins, 'consume'),
+                      (self.server.accounts, 'lookup_email'),
+                      (self.server.accounts, 'create_session'))
+        for target, operation in operations:
+            with self.subTest(operation=operation):
+                pending, unused, unused = self.start()
+                with patch.object(target, operation, side_effect=RemoteError('private backend token detail')):
+                    status, headers, body = self.request('GET', self.callback,
+                        cookie=pending, headers=self.navigation)
+                self.assertEqual(status, 303, body)
+                self.assertEqual(headers['Location'], '/account?signin=unavailable')
+                self.assertFalse(any(value.startswith('__Host-jobflow=') for value in headers['cookies']))
+                self.assertTrue(any('Max-Age=0' in value for value in headers['cookies']
+                                    if value.startswith('__Host-jobflow-pkce=')))
+                self.assertNotIn('private backend token detail', str(body))
+                self.assertNotIn(self.code, str(body))
+                with self.server.accounts._connect() as db:
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0], 0)
 
     def test_expired_flow_and_replaced_cookie_do_not_authenticate(self):
         with patch('jobflow.cloud_auth.time.monotonic', return_value=100):

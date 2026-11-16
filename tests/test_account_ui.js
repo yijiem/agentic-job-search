@@ -34,6 +34,17 @@ const fixture = () => ({complete:true, migrated:true,
   uploads:[],
 });
 async function main() {
+  for (const [reason, message] of [
+    ['retry', 'This sign-in link could not be used.'],
+    ['unavailable', 'a service was temporarily unavailable.'],
+  ]) {
+    const app = accountContext({search:`?signin=${reason}`,
+      fetch:async () => ({ok:true,json:async()=>({authenticated:false})})});
+    await app.evaluate('initializeAccount()');
+    assert.ok(app.query('#account-main').innerHTML.includes(message));
+    if (reason === 'unavailable')
+      assert.ok(!app.query('#account-main').innerHTML.includes('This sign-in link could not be used.'));
+  }
   {
     const app = accountContext();
     const original = fixture(); app.context.data = original;
