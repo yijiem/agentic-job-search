@@ -1171,11 +1171,11 @@ def _codex_task(root, store, batch, run, item):
         'click_granted': bool(item.get('codex_click_granted_at'))}
 
 
-def _codex_observation_url(value, expected, exact=False):
+def _codex_observation_url(value, expected, exact=False, strict=False):
     current, original = urlsplit(_url(value)), urlsplit(expected)
     def base(path):
         return re.sub(r'/(?:apply|application)/?$', '', path).rstrip('/')
-    if current.netloc != original.netloc or (current.path != original.path if exact else base(current.path) != base(original.path)) or parse_qs(
+    if strict and value != expected or current.netloc != original.netloc or (current.path != original.path if exact else base(current.path) != base(original.path)) or parse_qs(
             current.query, keep_blank_values=True) != parse_qs(original.query, keep_blank_values=True):
         raise ValueError('The observed form is for a different application. Verify the selected employer role.')
     return value
@@ -1196,7 +1196,8 @@ def _codex_confirmation_url(value, item):
             not current.fragment and
             parse_qs(current.query, keep_blank_values=True) == {'for': ['coinbase'], 'token': [role_id]}):
         return value
-    return _codex_observation_url(value, item['application_url'], exact=True)
+    return _codex_observation_url(value, item['application_url'], exact=True,
+        strict=binding.get('observed_company') == 'ByteDance')
 
 
 def _codex_bind_destination(root, store, batch, run, payload):
@@ -1235,7 +1236,10 @@ def _codex_bind_destination(root, store, batch, run, payload):
     nuro = (company == 'Nuro' and re.fullmatch(r'[0-9]+', role_id) and
         listing == 'https://nuro.ai/careersitem?gh_jid=' + role_id and
         destination == 'https://www.nuro.ai/careersitem?gh_jid=' + role_id and href == destination)
-    if not (coinbase or nuro):
+    bytedance = (company == 'ByteDance' and re.fullmatch(r'[0-9]+', role_id) and
+        listing == 'https://joinbytedance.com/search/' + role_id and
+        destination == 'https://jobs.bytedance.com/en/resume/' + role_id + '/apply' and href == destination)
+    if not (coinbase or nuro or bytedance):
         raise ValueError('This employer application destination is not a supported exact role mapping.')
     _codex_observation_url(href, destination, exact=True)
     if urlsplit(href).fragment:
@@ -1354,7 +1358,9 @@ def _codex_action(root, store, payload):
         planned = _answers(payload.get('planned_answers', {}))
         application_url = item.get('application_url', item['url'])
         request.update(fields=fields, planned_answers=planned,
-            observed_url=_codex_observation_url(payload.get('observed_url'), application_url, exact=bool(item.get('application_url'))),
+            observed_url=_codex_observation_url(payload.get('observed_url'), application_url,
+                exact=bool(item.get('application_url')),
+                strict=(item.get('destination_binding') or {}).get('observed_company') == 'ByteDance'),
             form_signature='codex-' + hashlib.sha256(json.dumps({'application_url': application_url, 'fields': fields,
                 'planned_answers': planned}, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
     if payload.get('status') == 'submitting':

@@ -118,6 +118,24 @@ class CodexBatchTests(unittest.TestCase):
         return self.bind_destination(**{'observed_company': 'Nuro',
             'observed_title': 'Senior Software Engineer, Observability', 'observed_role_id': '8011527', **changes})
 
+    def bytedance(self):
+        self.listing_url = 'https://joinbytedance.com/search/7683738047909873973'
+        self.destination_url = 'https://jobs.bytedance.com/en/resume/7683738047909873973/apply'
+        batch = self.store.get(BATCH_KIND, self.batch['id'])
+        job = self.store.get('jobs', 'job-1')
+        job.update(company='ByteDance', title='Senior Software Development Engineer, Storage Engine',
+                   url=self.listing_url)
+        self.store.put('jobs', 'job-1', job)
+        batch['items'][0].update({key: job[key] for key in ('company', 'title', 'url')})
+        self.store.put(BATCH_KIND, batch['id'], batch)
+        self.prepare()
+        self.context()
+
+    def bind_bytedance_destination(self, **changes):
+        return self.bind_destination(**{'observed_company': 'ByteDance',
+            'observed_title': 'Senior Software Development Engineer, Storage Engine',
+            'observed_role_id': '7683738047909873973', **changes})
+
     def inspect_destination(self, task=None):
         task = task or self.claim()
         return self.report(task, 'inspected', observed_url=self.destination_url,
@@ -763,6 +781,136 @@ class CodexBatchTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 self.bind_nuro_destination()
             self.assertEqual(self.store.get(BATCH_KIND, raw['id']), before)
+
+    def test_bytedance_binding_preserves_materials_and_requires_fresh_submission_checkpoints(self):
+        self.bytedance()
+        self.codex('codex_answers', job_id='job-1', answers={'Sponsorship': 'No'})
+        reviewed = self.inspect()['batch']
+        self.codex('codex_authorize', revision=reviewed['revision'], job_ids=['job-1'], confirmed=True)
+        before = self.store.get(BATCH_KIND, self.batch['id'])
+        bound = self.bind_bytedance_destination()['batch']['items'][0]
+        after = self.store.get(BATCH_KIND, self.batch['id'])
+        self.assertEqual(bound['url'], self.listing_url)
+        self.assertEqual(bound['application_url'], self.destination_url)
+        self.assertEqual(bound['status'], 'pending')
+        for key in ('authorization', 'fields', 'form_signature', 'planned_answers', 'attempt_id'):
+            self.assertNotIn(key, bound)
+        for key in ('answers', 'resume_id', 'resume_override', 'codex_review_history'):
+            self.assertEqual(after['items'][0][key], before['items'][0][key])
+        for key in ('answers', 'applicant'):
+            self.assertEqual(after[key], before[key])
+        self.assertEqual(after['codex_run']['id'], before['codex_run']['id'])
+        self.assertEqual(after['codex_run']['worker_id'], before['codex_run']['worker_id'])
+        self.assertEqual(after['items'][0]['destination_binding_history'], [bound['destination_binding']])
+        material = after['codex_run']['materials']['job-1']
+        self.assertEqual({key: value for key, value in material.items()
+                          if key not in ('application_url', 'destination_binding')},
+                         before['codex_run']['materials']['job-1'])
+        with self.assertRaisesRegex(ValueError, 'inspected, ready form'):
+            self.codex('codex_authorize', revision=self.current()['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        self.assertEqual(task['mode'], 'inspect')
+        self.assertEqual(task['application_url'], self.destination_url)
+        self.assertEqual(task['answers'], {'Work authorization': 'Yes', 'Sponsorship': 'No'})
+        self.assertEqual(Path(task['resume_path']).read_bytes(), self.content)
+        login = 'https://jobs.bytedance.com/en/login?redirect_path=%2Fresume%2F7683738047909873973%2Fapply'
+        wrong_urls = (self.listing_url, self.destination_url.replace('7683738047909873973', '999'),
+                      self.destination_url + '?extra=1', self.destination_url + '?',
+                      self.destination_url + '#apply', self.destination_url + '#',
+                      self.destination_url.replace('jobs.bytedance.com', 'www.jobs.bytedance.com'),
+                      self.destination_url.replace('jobs.bytedance.com', 'jobs.bytedance.com:443'), login,
+                      'https://jobs.bytedance.com/en/position/application',
+                      self.destination_url.replace('/apply', '/confirmation'))
+        for wrong in wrong_urls:
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(ValueError, 'different application'):
+                self.report(task, 'inspected', observed_url=wrong,
+                    fields=[{'key': 'name', 'type': 'text'}], planned_answers={'name': 'Ada'})
+        ready = self.inspect_destination(task)
+        self.codex('codex_authorize', revision=ready['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        self.assertTrue(self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'])['can_fill'])
+        self.report(task, 'submitting', form_signature=task['form_signature'])
+        self.assertTrue(self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'], phase='before_click')['can_click'])
+        self.assertFalse(self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'], phase='before_click')['can_click'])
+        for wrong in wrong_urls:
+            with self.subTest(wrong=wrong), self.assertRaises(ValueError):
+                self.report(task, 'submitted', evidence={'url': wrong, 'text': 'Received.'})
+        result = self.report(task, 'submitted', evidence={'url': self.destination_url, 'text': 'Application received.'})
+        self.assertEqual(result['batch']['codex_run']['status'], 'complete')
+        self.assertEqual(result['batch']['items'][0]['submitted_materials']['application_url'], self.destination_url)
+        self.assertEqual(len(self.store.get('applications', 'job-1')['browser_submissions']), 1)
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_bytedance_destination()
+
+    def test_bytedance_binding_rejects_role_host_query_fragment_and_login_changes(self):
+        self.bytedance()
+        invalid_urls = [self.listing_url,
+            self.destination_url.replace('7683738047909873973', '999'),
+            self.destination_url.replace('https:', 'http:'),
+            self.destination_url.replace('jobs.bytedance.com', 'www.jobs.bytedance.com'),
+            self.destination_url.replace('jobs.bytedance.com', 'jobs.bytedance.com:443'),
+            self.destination_url.replace('jobs.bytedance.com', 'jobs.bytedance.com.evil.example.com'),
+            self.destination_url.replace('/en/resume/', '/en/position/'),
+            self.destination_url.replace('/apply', '/application'),
+            self.destination_url + '/', self.destination_url + '?',
+            self.destination_url + '?role=7683738047909873973',
+            self.destination_url + '#apply', self.destination_url + '#',
+            'https://jobs.bytedance.com/en/login?redirect_path=%2Fresume%2F7683738047909873973%2Fapply']
+        invalid = [{'destination_url': url, 'observed_href': url} for url in invalid_urls]
+        invalid += [{'observed_href': url} for url in invalid_urls]
+        invalid += [{'observed_company': 'Other'}, {'observed_company': 'bytedance'},
+            {'observed_title': 'Other role'}, {'observed_role_id': '999'},
+            {'observed_role_id': 'not-numeric'}, {'listing_url': self.destination_url}]
+        before = self.current()
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                self.bind_bytedance_destination(**payload)
+            self.assertEqual(self.current(), before)
+
+    def test_bytedance_binding_requires_exact_canonical_listing(self):
+        self.bytedance()
+        invalid = [self.listing_url.replace('https:', 'http:'),
+            self.listing_url.replace('joinbytedance.com', 'www.joinbytedance.com'),
+            self.listing_url.replace('joinbytedance.com', 'joinbytedance.com:443'),
+            self.listing_url.replace('joinbytedance.com', 'jobs.bytedance.com'),
+            self.listing_url.replace('/search/', '/search/other/'),
+            self.listing_url + '/', self.listing_url + '?', self.listing_url + '?extra=1',
+            self.listing_url + '#apply', self.listing_url + '#']
+        for listing in invalid:
+            job = self.store.get('jobs', 'job-1')
+            job['url'] = listing
+            self.store.put('jobs', 'job-1', job)
+            raw = self.store.get(BATCH_KIND, self.batch['id'])
+            raw['items'][0]['url'] = listing
+            raw['codex_run']['materials']['job-1']['url'] = listing
+            self.store.put(BATCH_KIND, raw['id'], raw)
+            before = self.current()
+            with self.subTest(listing=listing), self.assertRaises(ValueError):
+                self.bind_bytedance_destination(listing_url=listing)
+            self.assertEqual(self.current(), before)
+
+    def test_bytedance_binding_rejects_foreign_stale_and_locked_attempts(self):
+        self.bytedance()
+        for payload in ({'worker_id': 'foreign'}, {'workspace_id': 'wrong'}, {'revision': -1}, {'job_id': 'job-2'}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                self.bind_bytedance_destination(**payload)
+        task = self.claim()
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_bytedance_destination()
+        self.report(task, 'needs_input', message='Verified listing leads to another application host.')
+        self.bind_bytedance_destination()
+        ready = self.inspect_destination()
+        self.codex('codex_authorize', revision=ready['revision'], job_ids=['job-1'], confirmed=True)
+        task = self.claim()
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_bytedance_destination()
+        self.report(task, 'submitting', form_signature=task['form_signature'])
+        self.codex('codex_check', job_id='job-1', attempt_id=task['attempt_id'], phase='before_click')
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_bytedance_destination()
+        self.report(task, 'uncertain', message='Outcome unclear; no retry.')
+        with self.assertRaisesRegex(ValueError, 'Resolve the current'):
+            self.bind_bytedance_destination()
 
 
 if __name__ == '__main__':

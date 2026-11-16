@@ -71,8 +71,8 @@ field's observed `required:true` and provide an explicit boolean planned answer
 for the supported checkbox. Do not fill during inspection. The condition is a
 plan; it must be verified in the actual filled form before submitting.
 
-Application URLs are bound to the selected role. The only supported external ATS
-binding is Coinbase's role-preserving link from
+Application URLs are bound to the selected role. Coinbase's supported external ATS
+binding is its role-preserving link from
 `https://www.coinbase.com/careers/positions/ID?gh_jid=ID` to
 `https://job-boards.greenhouse.io/embed/job_app?token=ID&for=coinbase&gh_jid=ID`.
 After observing the employer's actual Apply link and confirming the employer,
@@ -92,8 +92,20 @@ operation with `observed_company:"Nuro"`; for this redirect, `observed_href` is
 the actual landed URL, identical to `destination_url`. This preserves the listing,
 saved answers, resume, and history while requiring fresh inspection and
 authorization. It does not allow arbitrary host aliases or another ATS host.
+ByteDance's application link is supported only from
+`https://joinbytedance.com/search/ID` to
+`https://jobs.bytedance.com/en/resume/ID/apply`, with the same numeric role ID and
+no query parameters or fragments. Observe the listing's actual Apply link and
+verify the selected title on the signed-in application page. Use
+`codex_bind_destination` with `observed_company:"ByteDance"`, the original
+`listing_url`, and the exact application URL for both `observed_href` and
+`destination_url`. Finish any active attempt with `needs_input` first, then
+claim a fresh inspection after binding. Sign-in and consent remain user steps;
+login redirects are not application destinations. Existing answers, selected
+resumes, and completion history are preserved.
+
 Other redirects remain `needs_input`; never invent an observed URL.
-Nuro confirmation evidence must match its bound URL exactly. For Coinbase,
+Nuro and ByteDance confirmation evidence must match their bound URL exactly. For Coinbase,
 confirmation may use its bound URL or the exact receipt route
 `https://job-boards.greenhouse.io/embed/job_app/confirmation?for=coinbase&token=ID`
 with the same role ID and no extra query parameters. This does not authorize

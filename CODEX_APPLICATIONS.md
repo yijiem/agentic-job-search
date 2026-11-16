@@ -145,8 +145,8 @@ the real destination; never report the listing URL as the form's observed URL.
 The CLI supports Coinbase's exact role-preserving link from
 `https://www.coinbase.com/careers/positions/ID?gh_jid=ID` to
 `https://job-boards.greenhouse.io/embed/job_app?token=ID&for=coinbase&gh_jid=ID`.
-It also supports Nuro's exact canonical-host redirect described below. Other
-redirects remain a `needs_input` blocker.
+It also supports the exact Nuro redirect and ByteDance application link described
+below. Other redirects remain a `needs_input` blocker.
 
 After observing the link and verifying the employer, title, and matching numeric
 role ID on both pages, finish any active inspection with a `needs_input` report.
@@ -197,6 +197,20 @@ exact `observed_title`. The same ownership, revision, review invalidation, and
 one-click safeguards apply; saved answers and resume selections are preserved.
 Nuro confirmation evidence must match the bound URL exactly; this does not add
 an external receipt exception or permit arbitrary host aliases.
+
+For ByteDance, the only supported link is
+`https://joinbytedance.com/search/ID` to
+`https://jobs.bytedance.com/en/resume/ID/apply`, with the same numeric ID and no
+query parameters or fragments. Observe the selected listing's actual Apply link
+and verify its title on the signed-in application page. Finish any active attempt
+with `needs_input`, then use `codex_bind_destination` with
+`observed_company:"ByteDance"`, the original `listing_url`, and the exact application
+URL for both `observed_href` and `destination_url`. Keep the numeric
+`observed_role_id` and exact `observed_title`. Claim a fresh inspection after
+binding; prior review and authorization are invalidated while saved answers,
+resume selections, and history remain intact. Sign-in and consent remain user
+steps; login redirects cannot be bound. Confirmation evidence must match the
+bound application URL exactly. No separate receipt route is assumed.
 
 ### Authorize, fill, and click once
 
