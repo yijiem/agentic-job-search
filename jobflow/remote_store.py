@@ -270,7 +270,15 @@ class RemoteStore(RecordTransactions):
         self._complete.clear()
 
 
-def read_records(root, job_mode='matching', minimum=40, job_id=None):
+def read_records(root, job_mode='matching', minimum=40, job_id=None, display_only=False):
+    """Read records strictly by default, or a nonblocking display projection.
+
+    Display pages use stable (kind, created_at, id) keysets without a workspace
+    revision fence. They may show different committed versions, or omit a new
+    row inserted behind the cursor until refresh, but do not repeat existing
+    IDs when ingestion updates rows. Never use this mode for authoritative
+    exports or mutation decisions; foreground commands reread and validate CAS.
+    """
     store = RemoteStore(Path(root) / 'data/jobflow.sqlite3')
     records = defaultdict(list)
     cursor = {'p_after_kind': '', 'p_after_created': '', 'p_after_id': ''}
@@ -280,11 +288,11 @@ def read_records(root, job_mode='matching', minimum=40, job_id=None):
         try:
             page = store.client.rpc('jobflow_records_page', store._params(
                 p_kind=None, p_mode=job_mode, p_minimum=minimum, p_job=job_id,
-                p_limit=page_size, p_revision=revision, **cursor))
+                p_limit=page_size, p_revision=None if display_only else revision, **cursor))
         except RemoteResponseTooLarge:
             # Non-job records (e.g. resume drafts) can still be large. Retry the
             # same cursor at a smaller limit without relaxing the byte bound or
-            # the revision check, retaining support for these workspaces.
+            # the selected consistency policy, retaining support for these workspaces.
             if page_size == 1:
                 raise
             page_size = min(PAGE_SIZE, page_size // 2)

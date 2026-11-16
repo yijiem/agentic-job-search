@@ -16,7 +16,7 @@ Select a company and a minimum score of 80 to create a focused batch, or select 
 
 Use application stages, notes, response details, next actions, and follow-up dates to track progress. Historical submissions with unknown dates remain undated. Follow-up reminders reflect recorded dates and actions, not inbox synchronization. Email and calendar integrations are separate future work.
 
-Saving roles, task/interview edits, batch creation and ordinary resume edits use short independent transactions, so an unrelated job search does not hold them behind its workflow lock. Preparation and reports refresh afterward; the saved record is acknowledged first. Concurrent edits to the same record can still require a refresh. See [performance and concurrent editing](PERFORMANCE.md) for the operation boundaries, measured improvements and remaining optimization plan.
+Saving roles, task/interview edits, batch creation and ordinary resume edits use short independent transactions, so an unrelated job search does not hold them behind its workflow lock. Preparation and reports refresh afterward; the saved record is acknowledged first. Normal page reads also use isolated caches, so a slow load does not lock other pages. Hosted lists can briefly span committed revisions while search continues. Concurrent edits to the same record can still require a refresh. See [performance and concurrent editing](PERFORMANCE.md) for the operation boundaries, measured improvements and remaining optimization plan.
 
 ## Resumes and application details
 

@@ -3,11 +3,13 @@ import fcntl
 import gzip
 import io
 import json
+import shutil
 import tempfile
 import threading
 import unittest
 import urllib.error
 from http.client import HTTPConnection
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -391,6 +393,63 @@ class CloudHTTPTests(unittest.TestCase):
             self.assertEqual(result['background_job']['status'], 'pending')
             enqueue.assert_called_once_with(account['id'], 'run')
             lease.assert_not_called()
+
+    def test_remote_navigation_and_reads_bypass_held_shared_account_lock(self):
+        account, root = self.seed('owner@example.com', 'Owner')
+        cookie, csrf, unused = self.login(account['email'])
+        store = Store(root / 'data/jobflow.sqlite3')
+        try:
+            store.put('application_resumes', 'resume-one', {'id': 'resume-one',
+                'filename': 'resume.txt', 'mime': 'text/plain', 'size': 21,
+                'text': 'Owner verified resume', 'created_at': '2026-11-15T12:00:00+00:00'})
+        finally:
+            store.close()
+        scratch_paths, released = [], []
+
+        @contextmanager
+        def disposable_workspace(handler, current_account):
+            self.assertIs(handler.server, self.server)
+            self.assertEqual(current_account['id'], account['id'])
+            finished = threading.Event()
+            released.append(finished)
+            try:
+                with tempfile.TemporaryDirectory(dir=self.root, prefix='read-fixture-') as directory:
+                    scratch = Path(directory) / 'workspace'
+                    shutil.copytree(root, scratch)
+                    scratch_paths.append(scratch)
+                    yield scratch
+            finally:
+                finished.set()
+
+        # Exercise the remote routing branch over real HTTP with an RLock held
+        # by this thread. Only the remote cache boundary is substituted: the
+        # HTML, snapshot and resume handlers read an isolated local fixture.
+        with self.server.account_lock(account['id']), \
+                patch('jobflow.cloud.remote_enabled', return_value=True), \
+                patch('jobflow.remote.enabled', return_value=False), \
+                patch('jobflow.cloud.CloudHandler._user_workspace', disposable_workspace), \
+                patch('jobflow.cloud.hydrate_workspace',
+                      side_effect=AssertionError('GET hydrated the shared workspace')) as hydrate, \
+                patch('jobflow.cloud.execution_context',
+                      side_effect=RemoteBusyError('Background workflow owns the lease')) as lease:
+            responses = {}
+            for index, path in enumerate(('/', '/api/state', '/api/resumes'), 1):
+                with self.subTest(path=path):
+                    status, headers, body = self.request('GET', path, cookie=cookie)
+                    self.assertEqual(status, 200, body)
+                    self.assertEqual(headers['Cache-Control'], 'no-store')
+                    self.assertEqual(len(scratch_paths), index, 'One disposable context per request')
+                    self.assertTrue(released[-1].wait(1), 'Read context was not released')
+                    self.assertFalse(scratch_paths[-1].exists(), 'Disposable read files were not removed')
+                    responses[path] = body
+            hydrate.assert_not_called()
+            lease.assert_not_called()
+        self.assertIn(b'Opening your workspace', responses['/'])
+        self.assertEqual(responses['/api/state']['jobs'][0]['company'], 'Owner company')
+        self.assertEqual(responses['/api/state']['csrf_token'], csrf)
+        self.assertEqual(responses['/api/resumes']['resumes'][0]['id'], 'resume-one')
+        self.assertEqual(responses['/api/resumes']['applicant']['first_name'], 'Owner')
+        self.assertTrue((root / 'data/jobflow.sqlite3').exists(), 'Shared workspace remains intact')
 
     def test_authenticated_dashboard_assets_share_allowlist_and_preserve_binary_types(self):
         self.server.accounts.invite('owner@example.com')

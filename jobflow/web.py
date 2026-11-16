@@ -94,11 +94,14 @@ class WebError(ValueError):
 
 
 def _read_records(root, job_mode="matching", minimum=40, job_id=None):
-    """Read a consistent SQLite snapshot without creating or changing anything."""
+    """Read display data without creating or changing anything."""
     from .remote import workspace_id
     if workspace_id(root):
         from .remote_store import read_records
-        return read_records(root, job_mode=job_mode, minimum=minimum, job_id=job_id)
+        # Display pages can span committed revisions while ingestion continues.
+        # Commands reread their inputs and validate them atomically at commit.
+        return read_records(root, job_mode=job_mode, minimum=minimum, job_id=job_id,
+                            display_only=True)
     path = Path(root) / 'data/jobflow.sqlite3'
     records = defaultdict(list)
     if not path.exists():

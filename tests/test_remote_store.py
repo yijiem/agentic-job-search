@@ -506,6 +506,37 @@ class RemoteTests(unittest.TestCase):
                     read_records(self.root)
         self.assertEqual(409, result.exception.status)
 
+    def test_display_projection_stays_available_during_ingestion(self):
+        self.client.rows = {('jobs', key): self.row(key) for key in ('a', 'c', 'e')}
+        self.client.conflict_after_first_page = True
+        original_rpc = self.client.rpc
+        changed = False
+
+        def changing_rpc(name, args):
+            nonlocal changed
+            if name == 'jobflow_records_page' and args['p_after_id'] and not changed:
+                changed = True
+                self.client.revision += 1
+                self.client.rows['jobs', 'a']['body']['score'] = 80
+                self.client.rows['jobs', 'b'] = self.row('b')  # Behind cursor: visible next refresh.
+                self.client.rows['jobs', 'd'] = self.row('d')
+            return original_rpc(name, args)
+
+        with patch.object(self.client, 'rpc', side_effect=changing_rpc), \
+                patch('jobflow.remote_store.client_from_env', return_value=self.client), \
+                patch('jobflow.remote_store.UI_PAGE_SIZE', 2):
+            records, unused, count = read_records(self.root, display_only=True)
+        ids = [row['id'] for row in records['jobs']]
+        self.assertEqual(['a', 'c', 'd', 'e'], ids)
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(5, count)
+        self.assertTrue(all(args['p_revision'] is None for name, args in self.client.calls
+                            if name == 'jobflow_records_page'))
+        self.assertTrue(all(name == 'jobflow_records_page' for name, unused in self.client.calls))
+        with patch('jobflow.remote_store.client_from_env', return_value=self.client):
+            refreshed, unused, unused_count = read_records(self.root, display_only=True)
+        self.assertIn('b', {row['id'] for row in refreshed['jobs']})
+
     def test_ui_read_uses_bounded_500_row_pages_and_preserves_revision(self):
         self.client.rows = {('jobs', str(i)): self.row(str(i)) for i in range(1000)}
         self.client.revision = 17

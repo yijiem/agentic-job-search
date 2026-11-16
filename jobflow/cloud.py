@@ -12,7 +12,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from http.cookies import CookieError, SimpleCookie
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -190,6 +190,12 @@ class CloudHandler(JobflowHandler):
     def _root(self, account, hydrate=True):
         # Only a server-side account record can select a workspace. Client
         # account IDs, URL paths, and request bodies never participate in routing.
+        reads = getattr(self, '_read_workspaces', None)
+        if remote_enabled() and reads is not None:
+            roots, contexts = reads
+            if account['id'] not in roots:
+                roots[account['id']] = contexts.enter_context(self._user_workspace(account))
+            return roots[account['id']]
         if remote_enabled() and account['id'] not in self._held_account_locks:
             lock = self.server.account_lock(account['id'])
             if not lock.acquire(timeout=10):
@@ -346,10 +352,17 @@ class CloudHandler(JobflowHandler):
     def do_GET(self):
         # The email callback is a GET that can initialize and publish a new
         # workspace. It must observe its own writes without a read-only cache.
-        if unquote(urlsplit(self.path).path) == '/auth/callback':
+        path = unquote(urlsplit(self.path).path)
+        if path == '/auth/callback' or path.startswith('/api/codex/resumes/'):
             return self._get()
-        with file_read_cache():
-            self._get()
+        with file_read_cache(), ExitStack() as contexts:
+            # Normal reads get disposable caches too. They cannot overwrite a
+            # configuration writer's unpublished files or block another page.
+            self._read_workspaces = ({}, contexts)
+            try:
+                self._get()
+            finally:
+                self._read_workspaces = None
 
     def _get(self):
         try:
