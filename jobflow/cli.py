@@ -203,12 +203,11 @@ def dispatch(args, store, config, profile):
         result = perform_batch_action(root, store, config, profile, payload)
         if str(payload.get('op', '')).startswith('codex_'):
             result.setdefault('workspace_id', workspace_id(root))
-        if result.pop('application_updated', False):
+        if result.pop('application_updated', False) and not interactive:
             try:
                 prepare(store, config, profile)
                 coach(store, config)
-                if not interactive:
-                    write_reports(root, store, config)
+                write_reports(root, store, config)
             except (ValueError, OSError, RuntimeError, KeyError):
                 # The receipt and application were committed together already;
                 # report projection errors must never invite a second submit.

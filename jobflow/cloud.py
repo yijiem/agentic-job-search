@@ -35,6 +35,19 @@ UPLOAD_REQUEST_LIMIT = 7 * 1024 * 1024
 PDF_REVIEW_DRAFT_OPS = frozenset(('pdf_review_create', 'pdf_review_update', 'pdf_review_suggest'))
 
 
+def _batch_refresh_ready(result, operation=None):
+    """Defer report enqueueing until local browser work stops or finishes.
+
+    Application records are already durable. Actual scheduled workflows still
+    regenerate reports; this never cancels or suspends existing queued work.
+    """
+    if operation in ('codex_revoke', 'codex_discard'):
+        return True
+    batch = result.get('batch') or {}
+    run = result.get('run') or batch.get('codex_run')
+    return not run or run.get('status') in ('complete', 'paused', 'cancelled', 'discarded')
+
+
 class WorkspaceBusyError(WebError):
     """A request could not acquire its account lock before changing any data."""
 
@@ -281,13 +294,15 @@ class CloudHandler(JobflowHandler):
             raise WebError('Another workspace update is running. Read the run again before continuing.', 409)
         try:
             with execution_context(root, seconds=INTERACTIVE_LEASE_SECONDS):
-                hydrate_workspace(root)
+                # Pinned resume records fetch their own verified file lazily;
+                # an unrelated upload-library scan is not needed per checkpoint.
+                hydrate_workspace(root, uploads=False)
                 request = {'op': 'codex_hosted_resume' if resume_id is not None else 'codex_hosted_execute',
                            'account_id': account['id'], 'token': token}
                 request.update({'resume_id': resume_id} if resume_id is not None else {'request': payload})
                 result = _json_action(root, request, 'batch')
                 if (remote_enabled() and payload and payload.get('op') == 'codex_report' and
-                        payload.get('status') == 'submitted'):
+                        payload.get('status') == 'submitted' and _batch_refresh_ready(result)):
                     try:
                         self.server.queue.enqueue(account['id'], 'refresh')
                     except (RemoteError, OSError, sqlite3.Error):
@@ -642,7 +657,7 @@ class CloudHandler(JobflowHandler):
             # retry automatically. A later lease loss can follow a committed
             # write, so it must never invite a blind replay of the request.
             acquiring_workspace = True
-            root = self._root(account)
+            root = self._root(account, hydrate=False)
             lock = self.server.account_lock(account['id'])
             if not lock.acquire(blocking=False):
                 raise WorkspaceBusyError()
@@ -687,7 +702,8 @@ class CloudHandler(JobflowHandler):
                         # lock out the user's next annotation unnecessarily.
                         review_draft = (payload.get('action') == 'batch' and
                                         payload.get('op') in PDF_REVIEW_DRAFT_OPS)
-                        if remote_enabled() and not review_draft:
+                        if (remote_enabled() and not review_draft and
+                                (payload.get('action') != 'batch' or _batch_refresh_ready(result, payload.get('op')))):
                             self.server.queue.enqueue(account['id'], 'refresh')
             finally:
                 lock.release()

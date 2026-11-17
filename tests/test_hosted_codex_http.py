@@ -151,6 +151,57 @@ class HostedCodexHTTPTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_intermediate_runner_receipt_does_not_start_refresh_before_remaining_role(self):
+        prepared = self.owner('codex_prepare', workspace_id=self.workspace_id,
+            batch_id=self.batch['id'], revision=self.current()['revision'],
+            job_ids=['shared-id', 'unselected-role'])
+        self.connection = prepared['connection']
+        task = self.authorize()
+        self.runner('codex_report', job_id=task['job_id'], attempt_id=task['attempt_id'],
+                    status='submitting', form_signature=task['form_signature'])
+        self.runner('codex_check', job_id=task['job_id'], attempt_id=task['attempt_id'], phase='before_click')
+        # A pre-existing search must remain queued; browser bookkeeping only
+        # avoids adding a competing derived-report refresh.
+        self.server.queue.enqueue(self.account['id'], 'run')
+        existing = self.server.queue.status(self.account['id'])
+        with patch('jobflow.cloud.remote_enabled', return_value=True), \
+                patch.object(self.server.queue, 'enqueue') as enqueue:
+            result = self.runner('codex_report', job_id=task['job_id'], attempt_id=task['attempt_id'],
+                status='submitted', evidence={'url': task['url'], 'text': 'Application received.'})
+            self.assertEqual(result['batch']['codex_run']['status'], 'running')
+            enqueue.assert_not_called()
+        self.assertEqual(self.server.queue.status(self.account['id']), existing)
+        # Manual confirmation of the remaining role must enqueue exactly once
+        # after the run becomes complete, preserving both application receipts.
+        remaining = self.runner('codex_claim', job_id='unselected-role')['task']
+        self.runner('codex_report', job_id=remaining['job_id'], attempt_id=remaining['attempt_id'],
+                    status='needs_input', message='User completed the employer form manually.')
+        revision = self.current()['revision']
+        with patch('jobflow.cloud.remote_enabled', return_value=True), \
+                patch.object(self.server.queue, 'enqueue') as enqueue:
+            result = self.owner('reconcile', batch_id=self.batch['id'], revision=revision,
+                job_id='unselected-role', outcome='submitted', confirmed=True,
+                evidence={'url': remaining['url'], 'text': 'User verified application received.'})
+            self.assertEqual(result['batch']['codex_run']['status'], 'complete')
+            enqueue.assert_called_once_with(self.account['id'], 'refresh')
+        store = Store(self.workspace / 'data/jobflow.sqlite3')
+        try:
+            for identifier in ('shared-id', 'unselected-role'):
+                self.assertEqual(len(store.get('applications', identifier)['browser_submissions']), 1)
+        finally:
+            store.close()
+
+    def test_runner_hydrates_configuration_once_and_loads_selected_resume_lazily(self):
+        from jobflow.cloud import hydrate_workspace
+        self.prepare()
+        with patch('jobflow.cloud.hydrate_workspace', wraps=hydrate_workspace) as hydrate:
+            context = self.runner('codex_context')
+            hydrate.assert_called_once_with(self.workspace, uploads=False)
+        self.assertEqual(context['tasks'][0]['resume_download']['id'], self.resume['id'])
+        status, unused, data = self.download()
+        self.assertEqual(status, 200)
+        self.assertEqual(data, self.content)
+
     def test_public_runner_assets_contain_no_account_materials(self):
         for path in ('/codex/runner.py', '/codex/workflow.md'):
             with self.subTest(path=path):

@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from jobflow.cloud import CloudServer, validate_origin
+from jobflow.cloud import CloudServer, validate_origin, _batch_refresh_ready
 from jobflow.cloud_auth import (AuthError, AuthRateLimitError, EmailSendCooldown,
                                RateLimiter, SupabaseEmailAuth)
 from jobflow.onboarding import initialize_workspace, save_onboarding
@@ -38,6 +38,19 @@ class FakeEmailAuth:
 
 class CloudHTTPTests(unittest.TestCase):
     origin = 'https://jobs.example.test'
+
+    def test_batch_refresh_waits_for_local_browser_work_but_flushes_when_stopped(self):
+        for status in ('awaiting_start', 'running', 'ready', 'needs_input', 'uncertain'):
+            result = {'batch': {'codex_run': {'id': 'run', 'status': status}}}
+            with self.subTest(status=status):
+                self.assertFalse(_batch_refresh_ready(result, 'reconcile'))
+                self.assertFalse(_batch_refresh_ready(result, 'codex_prepare'))
+                self.assertTrue(_batch_refresh_ready(result, 'codex_revoke'))
+                self.assertTrue(_batch_refresh_ready(result, 'codex_discard'))
+        for status in ('complete', 'paused', 'cancelled', 'discarded'):
+            with self.subTest(status=status):
+                self.assertTrue(_batch_refresh_ready({'batch': {'codex_run': {'status': status}}}))
+        self.assertTrue(_batch_refresh_ready({'ok': True, 'batch': {'items': []}}, 'reconcile'))
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

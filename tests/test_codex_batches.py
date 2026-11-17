@@ -3,8 +3,12 @@ import hashlib
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from jobflow.application_batches import BATCH_KIND, batch_detail, batch_snapshot, perform_batch_action, workspace_id
 from jobflow.storage import Store
@@ -911,6 +915,35 @@ class CodexBatchTests(unittest.TestCase):
         self.report(task, 'uncertain', message='Outcome unclear; no retry.')
         with self.assertRaisesRegex(ValueError, 'Resolve the current'):
             self.bind_bytedance_destination()
+
+    def reconcile_via_cli(self, interactive):
+        from jobflow.cli import dispatch
+        task = self.submitting()
+        self.report(task, 'uncertain', message='Awaiting user verification; no second click.')
+        request = self.root / 'reconcile.json'
+        request.write_text(json.dumps({'op': 'reconcile', 'batch_id': self.batch['id'],
+            'revision': self.current()['revision'], 'job_id': 'job-1', 'outcome': 'submitted',
+            'confirmed': True, 'evidence': {'url': task['url'], 'text': 'User verified application received.'}}))
+        args = SimpleNamespace(root=self.root, command='batch', hosted=True,
+            hosted_interactive=interactive, codex_run=None, request=request)
+        with patch('jobflow.remote.workspace_id', return_value='remote-test'), \
+                patch('jobflow.cli.prepare') as prepare, patch('jobflow.cli.coach') as coach, \
+                patch('jobflow.cli.write_reports') as reports, redirect_stdout(StringIO()):
+            dispatch(args, self.store, self.config, {})
+        application = self.store.get('applications', 'job-1')
+        self.assertEqual(application['stage'], 'applied')
+        self.assertEqual(len(application['browser_submissions']), 1)
+        self.assertTrue(application['browser_submissions'][0]['manual'])
+        self.assertEqual(self.current()['items'][0]['status'], 'submitted')
+        return prepare, coach, reports
+
+    def test_hosted_interactive_reconciliation_commits_without_synchronous_projections(self):
+        for operation in self.reconcile_via_cli(interactive=True):
+            operation.assert_not_called()
+
+    def test_normal_cli_reconciliation_still_refreshes_derived_reports(self):
+        for operation in self.reconcile_via_cli(interactive=False):
+            operation.assert_called_once()
 
 
 if __name__ == '__main__':
